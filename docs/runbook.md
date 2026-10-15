@@ -385,6 +385,8 @@ El grupo se queda parado en ese nodo (ocupa el hueco). Opciones:
 
 ## Problemas frecuentes
 
+Si un nodo no se puede arreglar, ver [rollback.md](rollback.md).
+
 Regla general: el proceso deja una **marca de fallo** (`/var/lib/os-upgrade/failed`) cuando hace
 falta una persona. Con la marca puesta, los reintentos no hacen nada.
 

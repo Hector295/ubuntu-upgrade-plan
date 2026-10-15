@@ -77,6 +77,9 @@ El procedimiento completo, incluida la alternativa manual, está en el
 - [docs/runbook.md](docs/runbook.md): procedimiento paso a paso, seguimiento y problemas frecuentes.
 - [docs/configuracion.md](docs/configuracion.md): todos los parámetros y cómo personalizar un cluster.
 - [docs/kernel.md](docs/kernel.md): elegir, verificar, cambiar y deshacer el kernel fijado.
+- [docs/rollback.md](docs/rollback.md): qué hacer si un nodo sale mal: arreglarlo, otro kernel,
+  reconstruir worker o control plane, restaurar etcd.
+- [docs/lab.md](docs/lab.md): lab de VMs con libvirt para probar todo el flujo de principio a fin.
 
 ## Estructura
 
@@ -87,6 +90,7 @@ scripts/preflight.sh          comprobaciones previas del cluster (solo lectura)
 scripts/check-cluster.sh      estado detallado de nodos, etcd, Jobs y pods, con veredicto
 scripts/lib/                  librerías del operador: kubectl, etcd y comprobaciones
 scripts/validate-manifests.sh valida los Plans contra el CRD real del cluster y reglas propias
+lab/lab.sh                    lab de VMs (libvirt) con RKE2 y el SUC oficial para pruebas e2e
 manifests/base/               Plans, configuración por defecto y config de kustomize
 manifests/overlays/<cluster>/ lo único que se edita por cluster
 manifests/schemas/<cluster>/  CRD de Plans exportado de cada cluster
@@ -100,6 +104,7 @@ tools/                        install.sh descarga las herramientas fijadas (tool
 make lint       # shellcheck sin warnings (shell POSIX)
 make test       # bats: upgrade.sh sobre una raíz falsa, rollout/preflight sobre un cluster falso y manifiestos
 make check      # lint + test + validate
+lab/lab.sh up && lab/lab.sh e2e   # prueba completa en VMs locales (ver docs/lab.md)
 ```
 
 Nada de esto contacta con un cluster: `make` solo genera y valida archivos en local.
