@@ -14,17 +14,27 @@ done
 set -f
 case "$fmt" in
   *db:Status-Abbrev*)
+    # Como dpkg real: un paquete retenido (apt-mark hold) aparece como "hi", no "ii".
     found=1
     while read -r pkg; do
       for pat in $pats; do
         # shellcheck disable=SC2254
-        case "$pkg" in $pat) echo "ii  $pkg"; found=0; break ;; esac
+        case "$pkg" in $pat)
+          if held "$pkg"; then echo "hi  $pkg"; else echo "ii  $pkg"; fi
+          found=0; break ;;
+        esac
       done
     done < "$STUB_STATE/installed"
     exit $found ;;
   *)
     # shellcheck disable=SC2086
     set -- $pats
-    if installed "$1"; then printf 'install ok installed'; exit 0; fi
+    if installed "$1"; then
+      case "$fmt" in
+        *db:Status-Status*) printf 'installed' ;;
+        *) if held "$1"; then printf 'hold ok installed'; else printf 'install ok installed'; fi ;;
+      esac
+      exit 0
+    fi
     exit 1 ;;
 esac

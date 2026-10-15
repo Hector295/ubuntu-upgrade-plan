@@ -141,14 +141,17 @@ running_kernel() { uname -r; }
 
 free_mb() { df -Pm "$1" | awk 'NR==2 {print $4}'; }
 
+# Instalado, esté o no retenido: un paquete con apt-mark hold tiene ${Status}
+# "hold ok installed" (no "install ok installed"); ${db:Status-Status} es "installed" en ambos.
 pkg_installed() {
-  dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
+  [ "$(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null)" = "installed" ]
 }
 
-# Paquetes instalados ("ii") que coinciden con los patrones dados.
+# Paquetes instalados que coinciden con los patrones dados. En ${db:Status-Abbrev} la segunda
+# letra es el estado ("i" = instalado); la primera es la selección ("i" normal, "h" hold).
 installed_matching() {
   dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' "$@" 2>/dev/null \
-    | awk '$1 == "ii" {print $2}' || true
+    | awk 'substr($1, 2, 1) == "i" {print $2}' || true
 }
 
 kernel_packages() {
