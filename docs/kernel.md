@@ -1,79 +1,80 @@
-# Kernel fijado (`KERNEL_VERSION`)
+# Pinned kernel (`KERNEL_VERSION`)
 
-La única opción de kernel es una versión exacta, p. ej. `KERNEL_VERSION=6.8.0-139-generic`.
-Se instalan siempre tres paquetes de esa versión, que dependen de la versión destino:
+The only kernel option is an exact version, e.g. `KERNEL_VERSION=6.8.0-139-generic`. Three
+packages of that version are always installed, and which ones depends on the target release:
 
-| Destino | Paquetes |
+| Target | Packages |
 |---|---|
 | 24.04 | `linux-image-<v>`, `linux-modules-<v>`, `linux-modules-extra-<v>` |
-| 26.04 | `linux-image-<v>`, `linux-modules-<v>` (incluye lo que antes iba en `-extra`), `linux-main-modules-zfs-<v>` |
+| 26.04 | `linux-image-<v>`, `linux-modules-<v>` (includes what used to be in `-extra`), `linux-main-modules-zfs-<v>` |
 
-## Elegir y verificar la versión
+## Choosing and checking the version
 
-La versión tiene que estar publicada en el archivo de la versión destino (o en vuestro mirror).
-Ubuntu va retirando del índice ABIs antiguas, así que conviene comprobarlo antes de cada campaña:
+The version must be published in the archive of the target release (or in your mirror). Ubuntu
+drops old ABIs from the index over time, so check it before each campaign:
 
 ```sh
-# Desde un equipo con acceso (añadir -x http://proxy:puerto si hace falta):
+# From a machine with access (add -x http://proxy:port if needed):
 for pocket in noble-updates noble-security; do
   curl -fsSL "http://archive.ubuntu.com/ubuntu/dists/$pocket/main/binary-amd64/Packages.gz" \
     | zcat | grep -E '^Package: linux-(image|modules|modules-extra)-6\.8\.0-139-generic$'
 done
 ```
 
-Deben salir las tres líneas. Para 26.04, cambiar `noble` por `resolute` y
-`linux-(image|modules|modules-extra)` por `linux-(image|modules|main-modules-zfs)` (los kernels
-de 26.04 son la serie 7.0, p. ej. `7\.0\.0-38-generic`). En un nodo ya en la versión destino también vale
-`apt-cache policy linux-image-6.8.0-139-generic`.
+All three lines must show up. For 26.04, replace `noble` with `resolute` and
+`linux-(image|modules|modules-extra)` with `linux-(image|modules|main-modules-zfs)` (26.04 kernels
+are the 7.0 series, e.g. `7\.0\.0-38-generic`). On a node already on the target release,
+`apt-cache policy linux-image-6.8.0-139-generic` also works.
 
-Además, la **pre-descarga** lo comprueba en cada nodo: si el kernel no está disponible, el Job de
-pre-descarga falla con `no se pudo descargar el kernel ...`, días antes de la ventana.
+The **predownload** also checks it on every node: if the kernel is not available, the
+predownload Job fails with `could not download kernel ...`, days before the window.
 
-## Cómo se garantiza que el kernel se queda
+## How the kernel is kept in place
 
-| Riesgo | Medida |
+| Risk | Measure |
 |---|---|
-| El upgrade o un `apt upgrade` futuro instalan el kernel más nuevo a través del metapaquete (`linux-generic`, `linux-generic-hwe-*`...) | Los metapaquetes se quitan **antes** del full-upgrade de 22.04, y un pin de apt con prioridad `-1` impide reinstalarlos (`/etc/apt/preferences.d/99-os-upgrade-kernel`) |
-| El upgrader de Ubuntu reinstala `linux-generic` por su cuenta (quirk `_install_linux_metapackage`) | El pin lo impide; en `/var/log/dist-upgrade/main.log` aparecerá `Installing/upgrading 'linux-generic' failed`, y es lo **esperado**. Si aun así se instalara, el proceso purga después cualquier kernel distinto del fijado |
-| `autoremove` o una limpieza quitan el kernel fijado | `apt-mark hold` de sus tres paquetes |
-| GRUB arranca otro kernel con versión mayor (p. ej. el HWE de 22.04 que estaba arrancado) | `GRUB_DEFAULT` apunta a la entrada exacta del kernel fijado (`/etc/default/grub.d/99-os-upgrade-kernel.cfg`). Se comprueba en `grub.cfg` **antes** de reiniciar; si no está, no se reinicia y el nodo queda marcado |
-| Al quitar el metapaquete, `linux-firmware` y el microcode quedan huérfanos y `autoremove` los borra (NICs y RAID sin firmware) | Se marcan como instalados manualmente (`apt-mark manual`) |
+| The upgrade, or a future `apt upgrade`, installs the newest kernel through the metapackage (`linux-generic`, `linux-generic-hwe-*`...) | The metapackages are removed **before** the source release full-upgrade, and an apt pin with priority `-1` prevents reinstalling them (`/etc/apt/preferences.d/99-os-upgrade-kernel`) |
+| The Ubuntu upgrader reinstalls `linux-generic` on its own (quirk `_install_linux_metapackage`) | The pin prevents it; `/var/log/dist-upgrade/main.log` will show `Installing/upgrading 'linux-generic' failed`, which is **expected**. If it got installed anyway, the process later purges any kernel other than the pinned one |
+| `autoremove` or a cleanup removes the pinned kernel | `apt-mark hold` on its three packages |
+| GRUB boots another kernel with a higher version (e.g. the source release HWE kernel that was running) | `GRUB_DEFAULT` points to the exact entry of the pinned kernel (`/etc/default/grub.d/99-os-upgrade-kernel.cfg`). It is checked in `grub.cfg` **before** rebooting; if it is not there, the node does not reboot and is marked as failed |
+| Removing the metapackage orphans `linux-firmware` and the microcode, and `autoremove` deletes them (NICs and RAID without firmware) | They are marked as manually installed (`apt-mark manual`) |
 
-Tras el reboot, el proceso comprueba que `uname -r` es el kernel fijado y purga los demás
-kernels (incluido el de 22.04).
+After the reboot, the process checks that `uname -r` is the pinned kernel and purges the other
+kernels (including the source release one).
 
-## Comprobar un nodo
+## Checking a node
 
 ```sh
 uname -r                                          # 6.8.0-139-generic
-apt-mark showhold | grep 6.8.0-139                # los tres paquetes
+apt-mark showhold | grep 6.8.0-139                # the three packages
 cat /etc/apt/preferences.d/99-os-upgrade-kernel   # Pin-Priority: -1
 grep GRUB_DEFAULT /etc/default/grub.d/99-os-upgrade-kernel.cfg
-dpkg -l 'linux-image-*' | grep ^ii                # solo el kernel fijado
+dpkg -l 'linux-image-*' | grep ^ii                # only the pinned kernel
 sh /usr/local/sbin/os-upgrade.sh status
 ```
 
-## Cambiar de kernel más adelante
+## Changing the kernel later
 
-El mismo proceso sirve para nodos que ya están en la versión destino: no hace release upgrade, solo cambia
-el kernel con un reboot.
+The same process works for nodes already on the target release: it skips the release upgrade
+and only changes the kernel, with one reboot.
 
-1. Cambiar `KERNEL_VERSION` en `config.env` del overlay y `make validate CLUSTER=<cluster>`.
+1. Change `KERNEL_VERSION` in the overlay `config.env` and run `make validate CLUSTER=<cluster>`.
 2. `kubectl apply -f out/<cluster>.yaml`.
-3. Seguir el [runbook](runbook.md) desde la pre-descarga, poniendo de nuevo los labels
-   `os-upgrade=predownload` y luego `os-upgrade=upgrade`.
+3. Remove the `done` label from the nodes (`kubectl label node N os-upgrade-`) and follow the
+   [runbook](runbook.md) from the predownload (`rollout.sh predownload`, then
+   `rollout.sh upgrade`).
 
-El nuevo kernel queda retenido y el anterior se purga.
+The new kernel is held and the previous one is purged.
 
-## Deshacer el pin (volver a kernels gestionados por Ubuntu)
+## Undoing the pin (back to Ubuntu-managed kernels)
 
-Solo si se decide abandonar el kernel fijado. En el nodo:
+Only if you decide to stop pinning the kernel. On the node:
 
 ```sh
 V=6.8.0-139-generic
 sudo apt-mark unhold $(apt-mark showhold | grep -- "-$V\$")
 sudo rm /etc/apt/preferences.d/99-os-upgrade-kernel /etc/default/grub.d/99-os-upgrade-kernel.cfg
-sudo apt-get install linux-generic          # o el HWE: linux-generic-hwe-<versión>
+sudo apt-get install linux-generic          # or the HWE one: linux-generic-hwe-<version>
 sudo update-grub
-# reboot cuando corresponda (con drain)
+# reboot when appropriate (with a drain)
 ```

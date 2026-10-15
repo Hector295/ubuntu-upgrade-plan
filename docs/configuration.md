@@ -1,108 +1,110 @@
-# Configuración
+# Configuration
 
-Cada cluster tiene su overlay en `manifests/overlays/<cluster>/`, con dos archivos:
+Each cluster has its overlay in `manifests/overlays/<cluster>/`, with two files:
 
-- `config.env`: parámetros del proceso en los nodos. Se convierte en el ConfigMap
-  `os-upgrade-config-<hash>`, que los Jobs reciben como variables de entorno.
-- `kustomization.yaml`: imagen, namespace y ajustes de los Plans (ventana, deadlines...).
+- `config.env`: parameters for the process on the nodes. It becomes the ConfigMap
+  `os-upgrade-config-<hash>`, which the Jobs receive as environment variables.
+- `kustomization.yaml`: image, namespace and Plan settings (window, deadlines...).
 
-Para crear un cluster nuevo: `cp -r manifests/overlays/lab manifests/overlays/<cluster>`.
+To create a new cluster: `cp -r manifests/overlays/lab manifests/overlays/<cluster>`.
 
-> Cualquier cambio en `config.env` o en `scripts/upgrade.sh` genera un ConfigMap/Secret con
-> otro hash y, por tanto, Plans nuevos. **No cambies la configuración con nodos a mitad
-> de upgrade**; los nodos ya terminados no se ven afectados si tienen `os-upgrade=done`.
+> Any change to `config.env` or to `scripts/upgrade.sh` produces a ConfigMap/Secret with a
+> different hash and therefore new Plans. **Do not change the configuration while nodes are
+> halfway through an upgrade**; nodes that already finished are not affected if they have
+> `os-upgrade=done`.
 
-## Parámetros de `config.env`
+## `config.env` parameters
 
-Solo hace falta escribir los que cambian respecto al valor por defecto
-(`manifests/base/config.env`).
+Only the ones that differ from the default (`manifests/base/config.env`) need to be set.
 
-| Parámetro | Por defecto | Descripción |
+| Parameter | Default | Description |
 |---|---|---|
-| `TARGET_VERSION` | `24.04` | Versión destino: `24.04` (desde 22.04) o `26.04` (desde 24.04). Ver [Transiciones soportadas](#transiciones-soportadas) |
-| `KERNEL_VERSION` | *(obligatorio)* | Kernel exacto, formato `X.Y.Z-N-generic` (p. ej. `6.8.0-139-generic`). Se instalan `linux-image`, `linux-modules` y `linux-modules-extra` de esa versión. Ver [kernel.md](kernel.md) |
-| `SINGLE_REBOOT` | `true` | Si el nodo necesitaría un reboot previo al release upgrade (libc6, linux-base o un kernel de 22.04 pendientes), el preflight falla **antes del drain**. Con `false` solo avisa y el nodo reinicia dos veces |
-| `REQUIRE_PREDOWNLOAD` | `true` | El preflight exige que la pre-descarga se haya hecho para este `KERNEL_VERSION`. Con `false` solo avisa y todo se descarga en la ventana |
-| `APT_MIRROR` | *(vacío)* | Mirror para la pre-descarga, p. ej. `http://mirror.interno/ubuntu`. Vacío: el que usa el nodo en `sources.list` |
-| `HTTP_PROXY` | *(vacío)* | Proxy HTTP para apt y `do-release-upgrade` (`http://host:puerto`) |
-| `HTTPS_PROXY` | *(vacío)* | Proxy HTTPS |
-| `NO_PROXY` | *(vacío)* | Destinos sin proxy (p. ej. el mirror interno) |
-| `MIN_FREE_ROOT_MB` | `5000` | Espacio libre mínimo en `/` |
-| `MIN_FREE_BOOT_MB` | `300` | Espacio libre mínimo en `/boot` |
-| `MAX_REBOOTS` | `3` | Tope de reboots del proceso en un nodo; al superarlo el nodo queda marcado como fallido. Lo normal es 1 |
-| `ALLOW_THIRD_PARTY` | `true` | Ejecuta `do-release-upgrade --allow-third-party`. Ver [Fuentes de apt](#fuentes-de-apt-mirror-interno-y-repos-de-terceros) |
-| `POST_UPGRADE_HOOK_RETRIES` | `3` | Intentos del [hook post-upgrade](#hook-post-upgrade) (20 s entre intentos) antes de marcar el nodo |
+| `TARGET_VERSION` | `24.04` | Target release: `24.04` (from 22.04) or `26.04` (from 24.04). See [Supported transitions](#supported-transitions) |
+| `KERNEL_VERSION` | *(required)* | Exact kernel, format `X.Y.Z-N-generic` (e.g. `6.8.0-139-generic`). Three packages of that version are installed; which ones depends on the target (see [Supported transitions](#supported-transitions) and [kernel.md](kernel.md)) |
+| `SINGLE_REBOOT` | `true` | If the node would need a reboot before the release upgrade (pending libc6, linux-base or a source-release kernel), the preflight fails **before the drain**. With `false` it only warns and the node reboots twice |
+| `REQUIRE_PREDOWNLOAD` | `true` | The preflight requires the predownload to have been done for this `KERNEL_VERSION`. With `false` it only warns and everything is downloaded during the window |
+| `APT_MIRROR` | *(empty)* | Mirror for the predownload, e.g. `http://mirror.internal/ubuntu`. Empty: the one the node uses in its apt sources |
+| `HTTP_PROXY` | *(empty)* | HTTP proxy for apt and `do-release-upgrade` (`http://host:port`) |
+| `HTTPS_PROXY` | *(empty)* | HTTPS proxy |
+| `NO_PROXY` | *(empty)* | Destinations that bypass the proxy (e.g. the internal mirror) |
+| `MIN_FREE_ROOT_MB` | `5000` | Minimum free space on `/` |
+| `MIN_FREE_BOOT_MB` | `300` | Minimum free space on `/boot` |
+| `MAX_REBOOTS` | `3` | Maximum reboots of the process on a node; above it the node is marked as failed. Normally it is 1 |
+| `ALLOW_THIRD_PARTY` | `true` | Runs `do-release-upgrade --allow-third-party`. See [Apt sources](#apt-sources-internal-mirror-and-third-party-repos) |
+| `POST_UPGRADE_HOOK_RETRIES` | `3` | Attempts of the [post-upgrade hook](#post-upgrade-hook) (20 s apart) before marking the node |
 
-El proxy se exporta a apt, a `do-release-upgrade` y a la unidad systemd del host. Si los nodos
-ya tienen el proxy configurado en apt (`Acquire::http::Proxy`), no hace falta repetirlo aquí.
+The proxy is exported to apt, to `do-release-upgrade` and to the host systemd unit. If the nodes
+already have the proxy configured in apt (`Acquire::http::Proxy`), there is no need to repeat it
+here.
 
-## Transiciones soportadas
+## Supported transitions
 
-`do-release-upgrade` solo salta a la **siguiente LTS**, así que cada campaña es un salto:
+`do-release-upgrade` only jumps to the **next LTS**, so each campaign is one jump:
 
-| `TARGET_VERSION` | Origen | Codename | Paquetes del kernel fijado | Ejemplo de `KERNEL_VERSION` |
+| `TARGET_VERSION` | Source | Codename | Pinned kernel packages | Example `KERNEL_VERSION` |
 |---|---|---|---|---|
-| `24.04` (por defecto) | 22.04 | noble | `linux-image`, `linux-modules`, `linux-modules-extra` | `6.8.0-139-generic` |
+| `24.04` (default) | 22.04 | noble | `linux-image`, `linux-modules`, `linux-modules-extra` | `6.8.0-139-generic` |
 | `26.04` | 24.04 | resolute | `linux-image`, `linux-modules`, `linux-main-modules-zfs` | `7.0.0-38-generic` |
 
-- **26.04 no tiene `linux-modules-extra`:** su contenido se integró en `linux-modules`. Los
-  módulos de ZFS van en un paquete aparte que el metapaquete instala por defecto, y la
-  herramienta también lo instala.
-- **Probado en el lab** (3 control plane + 1 worker, RKE2 v1.33.13+rke2r2): 24.04 → 26.04.1 con
-  `7.0.0-38-generic`, un reboot por nodo. El upgrade conserva `initramfs-tools` (no cambia a
-  dracut) y RKE2 v1.33 funciona sobre 26.04. Para producción, confirmar además la matriz de
-  soporte de vuestra versión de RKE2.
-- **Un nodo dos LTS por detrás** (22.04 con `TARGET_VERSION=26.04`) se rechaza en `prepare`,
-  antes del drain: primero una campaña a 24.04 y después otra a 26.04.
-- **Un nodo que ya está en la versión destino** solo cambia de kernel.
-- La tabla vive en `scripts/upgrade.sh` (`TRANSITIONS`); `make validate` rechaza un
-  `TARGET_VERSION` que no esté en ella.
-- `spec.version` de los Plans toma el valor de `TARGET_VERSION` mediante el component
-  `manifests/components/target-version`. Los overlays nuevos copiados de `lab` ya lo incluyen;
-  `make validate` avisa si falta.
+- **26.04 has no `linux-modules-extra`:** its content was merged into `linux-modules`. The ZFS
+  modules come in a separate package that the metapackage installs by default, and the tool
+  installs it too.
+- **Tested in the lab** (3 control plane + 1 worker, RKE2 v1.33.13+rke2r2): 24.04 → 26.04.1 with
+  `7.0.0-38-generic`, one reboot per node. The upgrade keeps `initramfs-tools` (it does not switch
+  to dracut) and RKE2 v1.33 works on 26.04. For production, also check the support matrix of your
+  RKE2 version.
+- **A node two LTS releases behind** (22.04 with `TARGET_VERSION=26.04`) is rejected in `prepare`,
+  before the drain: first a campaign to 24.04, then another one to 26.04.
+- **A node already on the target release** only changes its kernel.
+- The table lives in `scripts/upgrade.sh` (`TRANSITIONS`); `make validate` rejects a
+  `TARGET_VERSION` that is not in it.
+- The Plans' `spec.version` takes the value of `TARGET_VERSION` through the component
+  `manifests/components/target-version`. New overlays copied from `lab` already include it;
+  `make validate` reports it if it is missing.
 
-## Fuentes de apt: mirror interno y repos de terceros
+## Apt sources: internal mirror and third-party repos
 
-`do-release-upgrade` solo reconoce como válidos los mirrors públicos de Ubuntu (su lista
-`mirrors.cfg`). Sin `--allow-third-party`, cualquier otra fuente se **desactiva** con el
-comentario `disabled on upgrade to noble`, y eso incluye un **mirror interno de Ubuntu**, que
-además se sustituye por `archive.ubuntu.com`. Con `--allow-third-party`, el upgrader comprueba
-cada fuente: si publica `noble`, la reescribe a `noble`; si no, la desactiva.
+`do-release-upgrade` only accepts the public Ubuntu mirrors as valid (its `mirrors.cfg` list).
+Without `--allow-third-party`, any other source is **disabled** with the comment
+`disabled on upgrade to <codename>`, and that includes an **internal Ubuntu mirror**, which is
+also replaced by `archive.ubuntu.com`. With `--allow-third-party`, the upgrader checks each
+source: if it publishes the target codename, it rewrites it to that codename; otherwise it
+disables it.
 
-| `ALLOW_THIRD_PARTY` | Mirror interno de Ubuntu | Repos de proveedores |
+| `ALLOW_THIRD_PARTY` | Internal Ubuntu mirror | Vendor repos |
 |---|---|---|
-| `true` (por defecto) | Se mantiene (si publica `noble`) | Se mantienen los que publican `noble`; los demás se desactivan |
-| `false` | `prepare` **falla antes del drain**: el upgrade lo cambiaría a `archive.ubuntu.com` | Se desactivan todos |
+| `true` (default) | Kept (if it publishes the target codename) | Those that publish the target codename are kept; the rest are disabled |
+| `false` | `prepare` **fails before the drain**: the upgrade would switch it to `archive.ubuntu.com` | All disabled |
 
-En cada nodo, `prepare` y la pre-descarga registran las fuentes no oficiales que encuentran
-(formatos `.list` y `.sources`) y cómo se tratarán. Al terminar, las fuentes que el upgrade
-haya desactivado salen como aviso y en el informe del nodo (`/var/log/os-upgrade-report.txt`).
-Reactivarlas es manual: hay que comprobar que el proveedor publica paquetes para la versión destino.
+On each node, `prepare` and the predownload log the unofficial sources they find (`.list` and
+`.sources` formats) and how they will be handled. At the end, the sources the upgrade disabled
+are reported as a warning and in the node report (`/var/log/os-upgrade-report.txt`).
+Re-enabling them is manual: check that the vendor publishes packages for the target release.
 
-`prepare` y la pre-descarga también avisan de los paquetes retenidos con `apt-mark hold`
-(aparte del kernel fijado), porque pueden impedir que `do-release-upgrade` calcule el upgrade.
+`prepare` and the predownload also warn about packages held with `apt-mark hold` (besides the
+pinned kernel), because they can stop `do-release-upgrade` from computing the upgrade.
 
-## Hook post-upgrade
+## Post-upgrade hook
 
-Script propio que se ejecuta en cada nodo **al final** del proceso, como root en el host, con
-el sistema ya en la versión destino, el kernel fijado arrancado y rke2 activo. Sirve para comprobaciones
-del entorno que la herramienta no conoce: montajes, servicios propios, drivers de GPU, agentes
-de monitorización, etc.
+Your own script that runs on each node **at the end** of the process, as root on the host, with
+the system already on the target release, the pinned kernel booted and rke2 active. It is for
+environment checks the tool does not know about: mounts, your own services, GPU drivers,
+monitoring agents, etc.
 
-- Recibe `NODE_NAME`, `KERNEL_VERSION` y `TARGET_VERSION`. Su salida va al log del nodo.
-- Si falla, se reintenta (`POST_UPGRADE_HOOK_RETRIES`, 20 s entre intentos). Si sigue
-  fallando, el nodo queda **marcado como fallido y cordoneado**: el sistema está actualizado,
-  pero algo propio no funciona.
-- Su sintaxis se comprueba en `make validate` y en `prepare` (antes del drain), y pasa por
-  shellcheck en `make lint`.
+- It receives `NODE_NAME`, `KERNEL_VERSION` and `TARGET_VERSION`. Its output goes to the node log.
+- If it fails, it is retried (`POST_UPGRADE_HOOK_RETRIES`, 20 s apart). If it keeps failing, the
+  node is **marked as failed and stays cordoned**: the system is upgraded, but something of your
+  own does not work.
+- Its syntax is checked by `make validate` and by `prepare` (before the drain), and it goes
+  through shellcheck in `make lint`.
 
-Para activarlo en un cluster, partir del ejemplo `docs/ejemplos/post-upgrade-hook.sh`:
+To enable it for a cluster, start from the example `docs/examples/post-upgrade-hook.sh`:
 
 ```sh
-cp docs/ejemplos/post-upgrade-hook.sh manifests/overlays/<cluster>/
+cp docs/examples/post-upgrade-hook.sh manifests/overlays/<cluster>/
 ```
 
-y añadir al `kustomization.yaml` del overlay:
+and add to the overlay `kustomization.yaml`:
 
 ```yaml
 secretGenerator:
@@ -112,11 +114,12 @@ secretGenerator:
       - post-upgrade-hook.sh
 ```
 
-El hook viaja en el mismo Secret que `upgrade.sh`: cambiarlo genera un Secret y unos Plans nuevos.
+The hook travels in the same Secret as `upgrade.sh`: changing it produces a new Secret and new
+Plans.
 
-## Ajustes de los Plans (`kustomization.yaml`)
+## Plan settings (`kustomization.yaml`)
 
-Ejemplo completo de un overlay de producción (probado con `make validate`):
+Full example of a production overlay (checked with `make validate`):
 
 ```yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -125,32 +128,35 @@ kind: Kustomization
 resources:
   - ../../base
 
+components:
+  - ../../components/target-version
+
 configMapGenerator:
   - name: os-upgrade-config
     behavior: merge
     envs:
       - config.env
 
-# Imagen de los Jobs desde un registry interno (solo necesita sh y chroot).
+# Job image from an internal registry (it only needs sh and chroot).
 images:
   - name: docker.io/library/ubuntu
-    newName: registry.interno.local/library/ubuntu
+    newName: registry.internal.local/library/ubuntu
     newTag: "24.04"
 
 patches:
-  # Ventana horaria: SUC no crea Jobs nuevos fuera de ella (los que están en curso siguen).
+  # Time window: the SUC does not create new Jobs outside it (running ones continue).
   - target: {kind: Plan, name: "os-upgrade-(workers|cp)"}
     patch: |
       - op: add
         path: /spec/window
         value: {days: ["saturday", "sunday"], startTime: "22:00", endTime: "06:00", timeZone: "UTC"}
-  # Más margen por nodo (drain + upgrade + reboot de un bare metal lento).
+  # More time per node (drain + upgrade + reboot of a slow bare metal server).
   - target: {kind: Plan, name: "os-upgrade-(workers|cp)"}
     patch: |
       - op: replace
         path: /spec/jobActiveDeadlineSecs
         value: 10800
-  # Más nodos pre-descargando a la vez (cuidado con el ancho de banda del proxy).
+  # More nodes predownloading at the same time (mind the proxy bandwidth).
   - target: {kind: Plan, name: os-upgrade-predownload}
     patch: |
       - op: replace
@@ -158,36 +164,37 @@ patches:
         value: 4
 ```
 
-Otros ajustes posibles con el mismo mecanismo: `namespace:` (si el SUC no está en
-`cattle-system`), `/spec/serviceAccountName`, `imagePullSecrets` o `/spec/postCompleteDelay`
-del Plan de control plane (por defecto `10m`).
+Other settings with the same mechanism: `namespace:` (if the SUC is not in `cattle-system`),
+`/spec/serviceAccountName`, `imagePullSecrets` or `/spec/postCompleteDelay` of the control plane
+Plan (default `10m`).
 
-### Valores por defecto de los Plans
+### Plan defaults
 
-| Plan | Nodos | concurrency | Deadline | Drain | Otros |
+| Plan | Nodes | concurrency | Deadline | Drain | Other |
 |---|---|---|---|---|---|
-| `os-upgrade-predownload` | todos con `os-upgrade=predownload` | 2 | 3600 s | no | — |
-| `os-upgrade-workers` | `os-upgrade=upgrade` sin rol control-plane | 1 | 7200 s | sí | prepare antes del drain |
-| `os-upgrade-cp` | `os-upgrade=upgrade` con rol control-plane (incluye nodos con todos los roles) | 1 | 7200 s | sí | prepare, `postCompleteDelay: 10m` |
+| `os-upgrade-predownload` | all with `os-upgrade=predownload` | 2 | 3600 s | no | - |
+| `os-upgrade-workers` | `os-upgrade=upgrade` without the control-plane role | 1 | 7200 s | yes | prepare before the drain |
+| `os-upgrade-cp` | `os-upgrade=upgrade` with the control-plane role (includes all-roles nodes) | 1 | 7200 s | yes | prepare, `postCompleteDelay: 10m` |
 
-Los tres Plans toleran cualquier taint y son `exclusive` (en SUC v0.16 eso solo impide que
-dos de estos Jobs coincidan **en el mismo nodo**; no serializa el cluster).
+The three Plans tolerate any taint and are `exclusive` (in SUC v0.16 this only prevents two of
+these Jobs from running **on the same node**; it does not serialize the cluster).
 
-## Lo que la validación impide
+## What validation prevents
 
-`make validate CLUSTER=<cluster>` falla si:
+`make validate CLUSTER=<cluster>` fails if:
 
-- Un Plan usa un campo que el CRD del cluster no conoce (p. ej. `postCompleteLabels`) o con un
-  tipo incorrecto. Se valida contra `manifests/schemas/<cluster>/crd-plans.json` en modo estricto.
-- Aparece `spec.drain.timeout`: en SUC v0.16 son nanosegundos en int32 (máximo ≈ 2 s) y un valor
-  grande rompió el listado de todos los Plans del controller.
-- Un Plan con drain tiene `concurrency` distinto de 1.
-- `jobActiveDeadlineSecs` no está entre 600 y 86400.
-- Una imagen no lleva tag explícito.
-- `KERNEL_VERSION` falta o tiene formato inválido; booleanos o números incorrectos;
-  proxy o mirror sin `http://`/`https://`.
-- El hook post-upgrade tiene errores de sintaxis.
-- Los recursos quedan en namespaces distintos.
+- A Plan uses a field the cluster CRD does not know (e.g. `postCompleteLabels`) or has a wrong
+  type. It is validated against `manifests/schemas/<cluster>/crd-plans.json` in strict mode.
+- `spec.drain.timeout` is present: in SUC v0.16 it is nanoseconds in an int32 (maximum about 2 s)
+  and a large value broke the listing of all the controller's Plans.
+- A Plan with drain has a `concurrency` other than 1.
+- `jobActiveDeadlineSecs` is not between 600 and 86400.
+- An image has no explicit tag.
+- `KERNEL_VERSION` is missing or has an invalid format; wrong booleans or numbers; proxy or
+  mirror without `http://`/`https://`.
+- `TARGET_VERSION` is not a supported target, or the Plans' `spec.version` does not match it.
+- The post-upgrade hook has syntax errors.
+- The resources end up in different namespaces.
 
-Si actualizáis Rancher, volved a exportar el CRD:
+If you upgrade Rancher, export the CRD again:
 `kubectl get crd plans.upgrade.cattle.io -o json > manifests/schemas/<cluster>/crd-plans.json`.

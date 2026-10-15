@@ -1,117 +1,142 @@
-# os-upgrade: Ubuntu LTS a la siguiente LTS con kernel fijado en nodos RKE2
+# os-upgrade: Ubuntu LTS to the next LTS with a pinned kernel on RKE2 nodes
 
-Herramienta para actualizar in place el sistema operativo de los nodos de clusters RKE2
-gestionados por Rancher, usando el **system-upgrade-controller (SUC)** que Rancher ya despliega
-en `cattle-system`. No modifica el SUC ni los Plans de Rancher.
+A tool to upgrade in place the operating system of the nodes of RKE2 clusters managed by
+Rancher, using the **system-upgrade-controller (SUC)** that Rancher already deploys in
+`cattle-system`. It does not modify the SUC or Rancher's own Plans.
 
-Qué hace en cada nodo:
+What it does on each node:
 
-- Actualiza Ubuntu a la siguiente LTS con `do-release-upgrade`: **22.04 → 24.04** o
-  **24.04 → 26.04**, según `TARGET_VERSION`
-  ([transiciones](docs/configuracion.md#transiciones-soportadas)). Los ejemplos de la
-  documentación usan 22.04 → 24.04.
-- Instala **exactamente** el kernel indicado en `KERNEL_VERSION` (p. ej. `6.8.0-139-generic`:
-  `linux-image`, `linux-modules` y `linux-modules-extra`) y garantiza que se quede: sin
-  metapaquetes, `apt-mark hold`, pin de apt y `GRUB_DEFAULT` fijo. Ver [docs/kernel.md](docs/kernel.md).
-- **Un solo reboot** por nodo en la ventana (pensado para bare metal).
-- Descarga previa de paquetes, sin drain, días antes de la ventana: la ventana no depende de la red.
-- Preflight antes del drain: si el nodo no puede actualizarse, falla sin cordonearlo.
-- Idempotente: cada reboot mata el pod, el Job crea otro y el proceso continúa donde quedó.
-- Mantiene el mirror interno y los repos de terceros que publican la versión destino
-  (`--allow-third-party`) y avisa de los que se desactivan.
-- Hook post-upgrade opcional por cluster para comprobaciones propias, e informe final en cada
-  nodo (`/var/log/os-upgrade-report.txt`).
+- Upgrades Ubuntu to the next LTS with `do-release-upgrade`: **22.04 → 24.04** or
+  **24.04 → 26.04**, depending on `TARGET_VERSION`
+  ([transitions](docs/configuration.md#supported-transitions)). The documentation examples use
+  22.04 → 24.04.
+- Installs **exactly** the kernel set in `KERNEL_VERSION` (e.g. `6.8.0-139-generic`) and keeps it
+  in place: no kernel metapackages, `apt-mark hold`, an apt pin and a fixed `GRUB_DEFAULT`. The
+  three packages installed depend on the target: `linux-image`, `linux-modules` and
+  `linux-modules-extra` for 24.04; `linux-image`, `linux-modules` and `linux-main-modules-zfs`
+  for 26.04. See [docs/kernel.md](docs/kernel.md).
+- **A single reboot** per node during the window (designed for bare metal).
+- Predownloads the packages, without draining, days before the window: the window does not
+  depend on the network.
+- Preflight before the drain: if the node cannot be upgraded, it fails without cordoning it.
+- Idempotent: each reboot kills the pod, the Job creates another one and the process continues
+  where it left off.
+- Keeps the internal mirror and the third-party repos that publish the target release
+  (`--allow-third-party`) and reports the ones that get disabled.
+- Optional per-cluster post-upgrade hook for your own checks, and a final report on each node
+  (`/var/log/os-upgrade-report.txt`).
 
-## Requisitos
+## Requirements
 
-- Clusters RKE2 con Rancher y su SUC en `cattle-system` (probado con `rancher/system-upgrade-controller:v0.16.3`).
-- Nodos Ubuntu en la versión de origen de la transición (o ya en la destino, para solo cambiar
-  de kernel), con GRUB.
-- Acceso de los nodos a un mirror de Ubuntu (directo, por proxy o mirror interno).
-- En tu equipo: `make`, `curl` y `kubectl`. El resto de herramientas se descarga en versiones
-  fijas con `make tools`.
-- **Un kubeconfig del cluster downstream con permisos de cluster-admin** para exportar el CRD,
-  aplicar los Plans, etiquetar nodos y consultar etcd. `make render`/`make validate` no lo
-  necesitan. Cómo obtenerlo y precauciones con varios clusters:
-  [runbook → Acceso al cluster](docs/runbook.md#acceso-al-cluster-kubeconfig).
+- RKE2 clusters with Rancher and its SUC in `cattle-system` (built for
+  `rancher/system-upgrade-controller:v0.16.3`).
+- Ubuntu nodes on the source release of the transition (or already on the target, to only change
+  the kernel), booting with GRUB.
+- Node access to an Ubuntu mirror (direct, through a proxy or an internal mirror).
+- On your machine: `make` and `curl`. `make tools` downloads pinned versions of the rest into
+  `tools/bin`: shellcheck, bats, kubeconform, kustomize, yq and kubectl (v1.33.5). The operator
+  scripts use the `kubectl` in your `PATH`, or the one in `KUBECTL`
+  (`export KUBECTL=$PWD/tools/bin/kubectl`); the lab uses the pinned one by default.
+- **A kubeconfig of the downstream cluster with cluster-admin permissions** to export the CRD,
+  apply the Plans, label nodes and query etcd. `make render`/`make validate` do not need it. How
+  to get it and precautions with several clusters:
+  [runbook → Cluster access](docs/runbook.md#cluster-access-kubeconfig).
 
-## Inicio rápido
+## Quick start
 
 ```sh
-export KUBECONFIG=~/.kube/mi-cluster.yaml   # kubeconfig del cluster (cluster-admin)
-kubectl config current-context              # comprobar SIEMPRE a qué cluster apuntas
-make tools                                  # shellcheck, bats, kubeconform, kustomize, yq en tools/bin
-cp -r manifests/overlays/lab manifests/overlays/mi-cluster
-$EDITOR manifests/overlays/mi-cluster/config.env      # como mínimo KERNEL_VERSION
-mkdir -p manifests/schemas/mi-cluster
-kubectl get crd plans.upgrade.cattle.io -o json > manifests/schemas/mi-cluster/crd-plans.json
-make validate CLUSTER=mi-cluster            # genera out/mi-cluster.yaml y lo valida
-kubectl apply -f out/mi-cluster.yaml        # crea los Plans; no afecta a ningún nodo todavía
+export KUBECONFIG=~/.kube/my-cluster.yaml   # cluster kubeconfig (cluster-admin)
+kubectl config current-context              # ALWAYS check which cluster you point to
+make tools                                  # pinned tools in tools/bin
+cp -r manifests/overlays/lab manifests/overlays/my-cluster
+$EDITOR manifests/overlays/my-cluster/config.env      # at least KERNEL_VERSION; for 24.04 -> 26.04 also TARGET_VERSION=26.04
+mkdir -p manifests/schemas/my-cluster
+kubectl get crd plans.upgrade.cattle.io -o json > manifests/schemas/my-cluster/crd-plans.json
+make validate CLUSTER=my-cluster            # renders out/my-cluster.yaml and validates it
+kubectl apply -f out/my-cluster.yaml        # creates the Plans; no node is affected yet
 ```
 
-Los Plans solo actúan sobre nodos con el label `os-upgrade`:
+The Plans only act on nodes with the `os-upgrade` label:
 
-| Label | Plan | Qué hace |
+| Label | Plan | What it does |
 |---|---|---|
-| `os-upgrade=predownload` | `os-upgrade-predownload` | Descarga paquetes. Sin drain ni reboot |
+| `os-upgrade=predownload` | `os-upgrade-predownload` | Downloads packages. No drain, no reboot |
 | `os-upgrade=upgrade` | `os-upgrade-workers` / `os-upgrade-cp` | Preflight → drain → upgrade → 1 reboot |
-| `os-upgrade=done` | ninguno | Nodo terminado (lo pones tú al acabar) |
-| `os-upgrade=hold` | ninguno | Nodo apartado: se excluye al lanzar o reanudar un grupo |
+| `os-upgrade=done` | none | Node finished. `rollout.sh` sets it after verifying the node (you set it in the manual procedure) |
+| `os-upgrade=hold` | none | Node set aside: excluded when launching or resuming a group |
 
-Los labels los pone el orquestador:
+The orchestrator sets the labels:
 
 ```sh
-sh scripts/preflight.sh --group 1                      # comprobaciones, solo lectura
-sh scripts/rollout.sh predownload --group 1 --wait     # pre-descarga (sin impacto)
-sh scripts/rollout.sh upgrade --group 1 --dry-run      # plan y comprobaciones, sin cambiar nada
-sh scripts/rollout.sh upgrade --group 1                # nodo a nodo, verificando y confirmando
+sh scripts/preflight.sh --group 1                      # checks, read-only
+sh scripts/rollout.sh predownload --group 1 --wait     # predownload (no impact)
+sh scripts/rollout.sh upgrade --group 1 --dry-run      # plan and checks, changes nothing
+sh scripts/rollout.sh upgrade --group 1                # node by node, verifying and confirming
 sh scripts/rollout.sh status --group 1
 ```
 
-`rollout.sh` ordena workers → control plane no líderes → líder de etcd (con `move-leader`
-antes). Supervisa prepare y drain con timeout, y aparta el nodo sin tocarlo si fallan. Después
-de cada nodo verifica versión destino, kernel, DaemonSets, pods, DNS y etcd, y pide confirmación antes
-del siguiente. Los grupos son un label `os-upgrade-group=<n>`.
+`rollout.sh` orders workers → non-leader control planes → etcd leader (with `move-leader`
+first). It supervises prepare and the drain with timeouts, and holds the node without touching it
+if they fail. After each node it verifies the target release, kernel, DaemonSets, pods, DNS and
+etcd, marks the node `done` and asks for confirmation before the next one. Groups are an
+`os-upgrade-group=<n>` label.
 
-El procedimiento completo, incluida la alternativa manual, está en el
+The complete procedure, including the manual alternative, is in the
 **[runbook](docs/runbook.md)**.
 
-## Documentación
+## Tested
 
-- [docs/runbook.md](docs/runbook.md): procedimiento paso a paso, seguimiento y problemas frecuentes.
-- [docs/configuracion.md](docs/configuracion.md): todos los parámetros y cómo personalizar un cluster.
-- [docs/kernel.md](docs/kernel.md): elegir, verificar, cambiar y deshacer el kernel fijado.
-- [docs/rollback.md](docs/rollback.md): qué hacer si un nodo sale mal: arreglarlo, otro kernel,
-  reconstruir worker o control plane, restaurar etcd.
-- [docs/lab.md](docs/lab.md): lab de VMs con libvirt para probar todo el flujo de principio a fin.
+Both transitions passed the VM lab end-to-end test ([docs/lab.md](docs/lab.md)): 3 control plane
++ 1 worker, RKE2 v1.33.13+rke2r2 and the official SUC v0.16.3, one reboot per node.
 
-## Estructura
+- 22.04 → 24.04 with `6.8.0-139-generic`.
+- 24.04 → 26.04.1 with `7.0.0-38-generic`.
+
+It has not yet been run on bare metal or with Rancher's own SUC.
+
+## Documentation
+
+- [docs/runbook.md](docs/runbook.md): step-by-step procedure, monitoring and common problems.
+- [docs/configuration.md](docs/configuration.md): all parameters, supported transitions and how
+  to customize a cluster.
+- [docs/kernel.md](docs/kernel.md): choosing, checking, changing and undoing the pinned kernel.
+- [docs/rollback.md](docs/rollback.md): what to do if a node goes wrong: fix it, another kernel,
+  rebuild a worker or a control plane, restore etcd.
+- [docs/lab.md](docs/lab.md): libvirt VM lab to test the whole flow end to end.
+
+## Layout
 
 ```
-scripts/upgrade.sh            se ejecuta en los nodos (subcomandos prepare, predownload, upgrade...)
-scripts/rollout.sh            orquestador: predownload, upgrade nodo a nodo, status
-scripts/preflight.sh          comprobaciones previas del cluster (solo lectura)
-scripts/check-cluster.sh      estado detallado de nodos, etcd, Jobs y pods, con veredicto
-scripts/lib/                  librerías del operador: kubectl, etcd y comprobaciones
-scripts/validate-manifests.sh valida los Plans contra el CRD real del cluster y reglas propias
-lab/lab.sh                    lab de VMs (libvirt) con RKE2 y el SUC oficial para pruebas e2e
-manifests/base/               Plans, configuración por defecto y config de kustomize
-manifests/overlays/<cluster>/ lo único que se edita por cluster
-manifests/schemas/<cluster>/  CRD de Plans exportado de cada cluster
-tests/                        tests bats: stubs del nodo (apt, dpkg, systemctl, grub...) y de kubectl
-tools/                        install.sh descarga las herramientas fijadas (tools/bin no se versiona)
+scripts/upgrade.sh             runs on the nodes (subcommands prepare, predownload, upgrade...)
+scripts/rollout.sh             orchestrator: predownload, node-by-node upgrade, status
+scripts/preflight.sh           cluster checks before a campaign (read-only)
+scripts/check-cluster.sh       detailed state of nodes, etcd, Jobs and pods, with a verdict
+scripts/lib/                   operator libraries: kubectl, etcd and checks
+scripts/validate-manifests.sh  validates the Plans against the real cluster CRD and our own rules
+manifests/base/                Plans, default config.env and kustomize config
+manifests/components/          target-version: copies TARGET_VERSION into the Plans' spec.version
+manifests/overlays/<cluster>/  the only thing edited per cluster (lab is the template)
+manifests/overlays/lab-vm*/    overlays for the VM lab (lab-vm: 22.04 -> 24.04, lab-vm-2604: 24.04 -> 26.04)
+manifests/schemas/<cluster>/   Plan CRD exported from each cluster
+lab/lab.sh                     libvirt VM lab with RKE2 and the official SUC for e2e tests
+docs/                          documentation; docs/examples/ has a post-upgrade hook example
+tests/bats/                    bats tests
+tests/stubs/                   fake node commands (apt, dpkg, systemctl, grub...) for upgrade.sh
+tests/k8s-stubs/               fake kubectl over a fake cluster for the operator scripts
+tests/lab-stubs/               fake virsh for the lab safety tests
+tools/                         install.sh downloads the pinned tools (tools/bin is not versioned)
 ```
 
-## Desarrollo
+## Development
 
 ```sh
-make lint       # shellcheck sin warnings (shell POSIX)
-make test       # bats: upgrade.sh sobre una raíz falsa, rollout/preflight sobre un cluster falso y manifiestos
+make lint       # shellcheck with no warnings
+make test       # bats: upgrade.sh on a fake root, operator scripts on a fake cluster, manifests, lab
 make check      # lint + test + validate
-lab/lab.sh up && lab/lab.sh e2e   # prueba completa en VMs locales (ver docs/lab.md)
+lab/lab.sh up && lab/lab.sh e2e   # full test on local VMs (see docs/lab.md)
 ```
 
-Nada de esto contacta con un cluster: `make` solo genera y valida archivos en local.
+None of the `make` targets contact a cluster: they only render and validate files locally.
 
-Convenciones: shell POSIX (`/bin/sh`, `set -eu`), mensajes y documentación en español,
-identificadores en inglés.
+Conventions: POSIX shell (`/bin/sh`, `set -eu`), shellcheck clean; code, messages and
+documentation in English.

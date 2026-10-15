@@ -1,84 +1,83 @@
-# Runbook: upgrade de un cluster
+# Runbook: upgrading a cluster
 
-La ventana se hace con **`scripts/rollout.sh`** ([paso 4](#4-ventana-con-rolloutsh-recomendado)),
-que lanza los nodos de uno en uno, supervisa cada fase, verifica el resultado y pide
-confirmación antes del siguiente. Los procedimientos manuales, nodo a nodo
-([paso 5](#5-ventana-manual-un-nodo-cada-vez)) o por grupos
-([paso 6](#6-ventana-manual-por-grupos)), quedan como alternativa y como referencia de lo que
-hace el orquestador.
+The window is run with **`scripts/rollout.sh`** ([step 4](#4-window-with-rolloutsh-recommended)),
+which launches nodes one at a time, supervises each phase, verifies the result and asks for
+confirmation before the next one. The manual procedures, node by node
+([step 5](#5-manual-window-one-node-at-a-time)) or by groups
+([step 6](#6-manual-window-by-groups)), remain as an alternative and as a reference of what the
+orchestrator does.
 
-Convenciones: `N` es el nombre del nodo, `G` el número de grupo y `NS=cattle-system`. Los
-ejemplos son de la campaña 22.04 → 24.04; para 24.04 → 26.04 (`TARGET_VERSION=26.04`) el
-procedimiento es el mismo cambiando las versiones
-([transiciones](configuracion.md#transiciones-soportadas)).
+Conventions: `N` is the node name, `G` the group number and `NS=cattle-system`. The examples are
+from the 22.04 → 24.04 campaign; for 24.04 → 26.04 (`TARGET_VERSION=26.04`) the procedure is the
+same with the other versions ([transitions](configuration.md#supported-transitions)).
 
-## Acceso al cluster (kubeconfig)
+## Cluster access (kubeconfig)
 
-`make render` y `make validate` funcionan sin cluster. **Todo lo demás necesita un kubeconfig**
-del cluster downstream (no el del cluster de Rancher) con permisos de **cluster-admin**. Hacen
-falta para:
+`make render` and `make validate` work without a cluster. **Everything else needs a kubeconfig**
+of the downstream cluster (not the Rancher management cluster) with **cluster-admin**
+permissions. It is needed to:
 
-- exportar el CRD;
-- crear los Plans, el Secret y el ConfigMap en `cattle-system`;
-- poner labels a los nodos;
-- leer Jobs y logs;
-- hacer `exec` en los pods de etcd (`preflight.sh`, `rollout.sh`, `check-cluster.sh`).
+- export the CRD;
+- create the Plans, the Secret and the ConfigMap in `cattle-system`;
+- label the nodes;
+- read Jobs and logs;
+- `exec` into the etcd pods (`preflight.sh`, `rollout.sh`, `check-cluster.sh`).
 
-Los scripts del operador necesitan además `make tools` (usan `tools/bin/yq`) y `date` de GNU.
+The operator scripts also need `make tools` (they use `tools/bin/yq`) and GNU `date`. They use the
+`kubectl` in the `PATH`, or the one in `KUBECTL` (e.g. `export KUBECTL=$PWD/tools/bin/kubectl`).
 
-Cómo obtenerlo:
+How to get it:
 
-- **Desde Rancher:** cluster → *Download KubeConfig*. Pasa por Rancher (por el
-  `cattle-cluster-agent`): mientras se drena el nodo donde corre ese agente, la conexión se corta
-  unos segundos y hay que relanzar los comandos con `-w` o `-f`.
-- **Desde un nodo control plane:** `/etc/rancher/rke2/rke2.yaml`, cambiando `server:
-  https://127.0.0.1:6443` por la IP o el FQDN de un control plane. Mejor uno que **no** se
-  esté actualizando en ese momento, o un balanceador delante de los tres.
+- **From Rancher:** cluster → *Download KubeConfig*. It goes through Rancher (through the
+  `cattle-cluster-agent`): while the node running that agent is drained, the connection drops
+  for a few seconds and commands with `-w` or `-f` must be relaunched.
+- **From a control plane node:** `/etc/rancher/rke2/rke2.yaml`, replacing `server:
+  https://127.0.0.1:6443` with the IP or FQDN of a control plane. Preferably one that is **not**
+  being upgraded at that moment, or a load balancer in front of the three.
 
-Con varios clusters, usa un archivo por cluster y comprueba **siempre** a cuál apuntas antes de
-aplicar o etiquetar nada:
+With several clusters, use one file per cluster and **always** check which one you point to
+before applying or labeling anything:
 
 ```sh
 export KUBECONFIG=~/.kube/<cluster>.yaml
 kubectl config current-context
-kubectl get nodes -o wide          # ¿son los nodos que esperas?
+kubectl get nodes -o wide          # are these the nodes you expect?
 NS=cattle-system
 ```
 
-## 0. Antes de la campaña (una vez por cluster)
+## 0. Before the campaign (once per cluster)
 
-1. **Reintentos de los Jobs del SUC.** Cada reboot mata el pod del Job y cuenta como un fallo.
-   Por defecto el SUC v0.16 permite 2 (`backoffLimit`). Comprobad lo que configura Rancher:
+1. **SUC Job retries.** Each reboot kills the Job pod and counts as a failure. By default SUC
+   v0.16 allows 2 (`backoffLimit`). Check what Rancher configures:
 
    ```sh
    kubectl -n cattle-system get deploy system-upgrade-controller -o jsonpath='{..env}'; echo
    kubectl -n cattle-system get configmap -o name | grep -i upgrade
    ```
 
-   Con el flujo normal (1 reboot) basta con el valor por defecto. Con `SINGLE_REBOOT=false` o
-   reintentos manuales el margen es pequeño: tenedlo en cuenta al leer el estado de un Job.
-2. **Kernel disponible:** ver [kernel.md](kernel.md#elegir-y-verificar-la-versión).
-3. **Congelar los upgrades de RKE2 en Rancher** mientras dure la campaña: los Plans
-   `system-agent-upgrader*` de Rancher no deben coincidir con estos.
-4. **Snapshot de etcd reciente** (Rancher → cluster → Snapshots, o
-   `kubectl get etcdsnapshotfiles`).
-5. **Estado sano:** `sh scripts/preflight.sh` (solo lectura) comprueba de una vez el SUC, los
-   Plans, que no haya Plans de Rancher en curso, nodos Ready, etcd (miembros, salud, un líder,
-   RAFT INDEX igualado, alarmas), la antigüedad del último snapshot, PDBs que bloquearían el
-   drain y el espacio libre de los nodos. Sale con 1 si algo falla.
-   `sh scripts/check-cluster.sh` muestra el detalle (tablas de etcd, Jobs, pods con problemas).
-6. **Definir los grupos** (para pre-descargar y actualizar por tandas):
-   un label `os-upgrade-group` por nodo. Sirve para pre-descargar y actualizar por grupos.
+   With the normal flow (1 reboot) the default is enough. With `SINGLE_REBOOT=false` or manual
+   retries the margin is small: keep it in mind when reading the state of a Job.
+2. **Kernel available:** see [kernel.md](kernel.md#choosing-and-checking-the-version).
+3. **Freeze RKE2 upgrades in Rancher** for the duration of the campaign: Rancher's
+   `system-agent-upgrader*` Plans must not run at the same time as these.
+4. **Recent etcd snapshot** (Rancher → cluster → Snapshots, or `kubectl get etcdsnapshotfiles`).
+5. **Healthy state:** `sh scripts/preflight.sh` (read-only) checks in one go the SUC, the Plans,
+   that no Rancher Plan is in progress, nodes Ready, etcd (members, health, one leader, RAFT INDEX
+   in sync, alarms), the age of the latest snapshot, PDBs that would block the drain and the free
+   space on the nodes. It exits with 1 if something fails. `sh scripts/check-cluster.sh` shows
+   the details (etcd tables, Jobs, pods with problems).
+6. **Define the groups** (to predownload and upgrade in batches): one `os-upgrade-group` label
+   per node.
 
    ```sh
-   kubectl label node w1 w2 os-upgrade-group=1        # canario: 1-2 workers
+   kubectl label node w1 w2 os-upgrade-group=1        # canary: 1-2 workers
    kubectl label node w3 w4 w5 w6 os-upgrade-group=2
-   kubectl label node cp2 cp3 os-upgrade-group=3      # control plane no líderes
-   kubectl label node cp1 os-upgrade-group=4          # control plane líder, siempre solo
+   kubectl label node cp2 cp3 os-upgrade-group=3      # non-leader control planes
+   kubectl label node cp1 os-upgrade-group=4          # leader control plane, always alone
    kubectl get nodes -L os-upgrade-group,os-upgrade
    ```
 
-## 1. Generar y aplicar los Plans
+## 1. Render and apply the Plans
 
 ```sh
 make validate CLUSTER=<cluster>
@@ -86,136 +85,137 @@ kubectl apply -f out/<cluster>.yaml
 kubectl -n $NS get plans
 ```
 
-Aplicar los Plans no toca ningún nodo: solo actúan sobre nodos con el label `os-upgrade`.
+Applying the Plans does not touch any node: they only act on nodes with the `os-upgrade` label.
 
-## 2. Pre-parcheo (para tener un solo reboot)
+## 2. Pre-patching (to get a single reboot)
 
-`do-release-upgrade` exige reiniciar antes si 22.04 tiene pendiente una actualización de
-`libc6`, `linux-base` o del kernel. Los metapaquetes de kernel se quitan antes del full-upgrade,
-así que normalmente solo `libc6` puede provocarlo. Con `SINGLE_REBOOT=true` (por defecto), un nodo
-en esa situación **no se drena**: el preflight falla con
-`el nodo necesitaría un reboot previo por: ...`.
+`do-release-upgrade` requires a reboot first if the source release has a pending update of
+`libc6`, `linux-base` or the kernel. The kernel metapackages are removed before the full-upgrade,
+so usually only `libc6` can cause it. With `SINGLE_REBOOT=true` (default), a node in that
+situation **is not drained**: the preflight fails with
+`the node would need a prior reboot because of: ...`.
 
-La pre-descarga (paso 3) avisa de qué nodos están en ese caso. Esos nodos se ponen al día y se
-reinician en la ventana de parches habitual, antes de la ventana del upgrade.
+The predownload (step 3) reports which nodes are in that situation. Patch and reboot those nodes
+in the usual patching window, before the upgrade window.
 
-## 3. Pre-descarga (días antes, sin impacto)
+## 3. Predownload (days before, no impact)
 
-Sin drain, sin cordon y sin reboot. Se puede lanzar por nodos o por grupos; el Plan descarga
-en 2 nodos a la vez (`concurrency`, ajustable en el overlay). Con el orquestador:
+No drain, no cordon and no reboot. It can be launched per node or per group; the Plan downloads
+on 2 nodes at a time (`concurrency`, adjustable in the overlay). With the orchestrator:
 
 ```sh
-sh scripts/rollout.sh predownload --group G --wait   # etiqueta, espera y resume avisos por nodo
+sh scripts/rollout.sh predownload --group G --wait   # labels, waits and summarizes warnings per node
 ```
 
-Omite los nodos `done`, `hold` y los que están en `upgrade`. Sin `--wait` solo etiqueta. A mano:
+It skips nodes in `done`, `hold` and those in `upgrade`. Without `--wait` it only labels. By hand:
 
 ```sh
-kubectl label node N1 N2 N3 os-upgrade=predownload --overwrite      # por nodos
-kubectl label node -l os-upgrade-group=G os-upgrade=predownload --overwrite   # por grupo
+kubectl label node N1 N2 N3 os-upgrade=predownload --overwrite      # per node
+kubectl label node -l os-upgrade-group=G os-upgrade=predownload --overwrite   # per group
 kubectl -n $NS get jobs -l upgrade.cattle.io/plan=os-upgrade-predownload -w
 ```
 
-Resultado por nodo:
+Result per node:
 
 ```sh
 kubectl -n $NS logs job/<job> -c upgrade | tail
-# ... INFO Pre-descarga OK: 734 paquetes, 812 MB en /var/lib/os-upgrade/archives
-# ... WARN este nodo necesitará parche + reboot previo ...   <- ver paso 2
+# ... INFO Predownload OK: 734 packages, 812 MB in /var/lib/os-upgrade/archives
+# ... WARN this node will need patching + a prior reboot ...   <- see step 2
 ```
 
-Un nodo con la pre-descarga terminada tiene el label
-`plan.upgrade.cattle.io/os-upgrade-predownload` con el hash del Plan.
+A node with the predownload finished has the label
+`plan.upgrade.cattle.io/os-upgrade-predownload` with the Plan hash.
 
-**Cuanto más cerca de la ventana, mejor:** lo que publique Ubuntu entre la pre-descarga y la
-ventana se descargará en la ventana.
+**The closer to the window, the better:** whatever Ubuntu publishes between the predownload and
+the window is downloaded during the window.
 
-## 4. Ventana con `rollout.sh` (recomendado)
+## 4. Window with `rollout.sh` (recommended)
 
 ```sh
-sh scripts/preflight.sh --group G                     # solo lectura
-sh scripts/rollout.sh upgrade --group G --dry-run     # plan, orden y comprobaciones, sin cambiar nada
-sh scripts/rollout.sh upgrade --group G               # la ventana
-sh scripts/rollout.sh status --group G                # estado de los nodos del grupo
+sh scripts/preflight.sh --group G                     # read-only
+sh scripts/rollout.sh upgrade --group G --dry-run     # plan, order and checks, changes nothing
+sh scripts/rollout.sh upgrade --group G               # the window
+sh scripts/rollout.sh status --group G                # state of the group's nodes
 ```
 
-En vez de `--group G` se puede usar `--nodes n1,n2`. La ventana dura horas: ejecútalo dentro de
-`tmux` o `screen`. Si la sesión se corta, **relanzar el mismo comando** retoma el nodo en curso
-y omite los terminados (`done`) y los apartados (`hold`).
+Instead of `--group G` you can use `--nodes n1,n2`. The window lasts hours: run it inside `tmux`
+or `screen`. If the session drops, **relaunching the same command** resumes the node in progress
+and skips the finished (`done`) and held (`hold`) ones.
 
-### Qué hace
+### What it does
 
-1. Ordena los nodos: **workers → control plane no líderes → líder de etcd**, y muestra el plan.
-   Un grupo puede mezclar workers y control plane: el orquestador los hace de uno en uno.
-2. Comprueba el cluster: API, SUC, Plans aplicados, ningún Plan de Rancher en curso y snapshot
-   de etcd reciente. Pide confirmación para empezar.
-3. Para cada nodo:
-   1. **Antes:** nodos Ready, ningún otro nodo en upgrade, etcd sano (miembros, salud, un líder,
-      RAFT INDEX igualado, sin alarmas). Avisa si hay PDBs bloqueados en namespaces con pods en
-      el nodo. Si el nodo es el líder de etcd, hace `move-leader` a otro miembro (preferiblemente
-      ya actualizado) y comprueba que el liderazgo cambió.
-   2. **Lanza** el nodo (`os-upgrade=upgrade`) y **supervisa** las fases del Job: prepare, drain,
-      upgrade, reboot.
-   3. **Verifica** (reintentando hasta 5 min mientras se estabiliza): Ubuntu 24.04, kernel
-      objetivo, Ready, schedulable, Plan terminado, pods del nodo sanos, todos los DaemonSets
-      completos, etcd sano (si es control plane) y una prueba de DNS/red con un pod en ese nodo.
-   4. Marca el nodo `os-upgrade=done` y **pide confirmación** antes del siguiente.
+1. Orders the nodes: **workers → non-leader control planes → etcd leader**, and shows the plan.
+   A group can mix workers and control planes: the orchestrator does them one at a time.
+2. Checks the cluster: API, SUC, Plans applied, no Rancher Plan in progress and a recent etcd
+   snapshot. Asks for confirmation to start (`[y/N]`).
+3. For each node:
+   1. **Before:** nodes Ready, no other node being upgraded, etcd healthy (members, health, one
+      leader, RAFT INDEX in sync, no alarms). It warns about blocked PDBs in namespaces with pods
+      on the node. If the node is the etcd leader, it runs `move-leader` to another member
+      (preferably one already upgraded) and checks that the leadership moved.
+   2. **Launches** the node (`os-upgrade=upgrade`) and **supervises** the Job phases: prepare,
+      drain, upgrade, reboot.
+   3. **Verifies** (retrying for up to 5 min while things settle): target Ubuntu release, target
+      kernel, Ready, schedulable, Plan finished, the node's pods healthy, all DaemonSets
+      complete, etcd healthy (for control planes) and a DNS/network test with a pod on that node.
+   4. Marks the node `os-upgrade=done` and **asks for confirmation** before the next one.
 
-### Qué hace cuando algo va mal
+### What it does when something goes wrong
 
-| Situación | Reacción | Estado del nodo |
+| Situation | Reaction | Node state |
 |---|---|---|
-| `prepare` falla o supera `--prepare-timeout` | Muestra el log de prepare, aparta el nodo y para | **Intacto**: ni cordoneado ni drenado. `os-upgrade=hold` |
-| El drain supera `--drain-timeout` | Muestra los pods que quedan y los PDBs bloqueados. Pregunta **[e]sperar** otro intervalo o **[a]bortar** (con `--yes`, aborta) | Al abortar: `hold` y **uncordon** (seguro: el upgrade no había empezado) |
-| El Job falla después de empezar el upgrade, o se supera `--node-timeout` | Muestra condiciones del Job y log, y para | **Cordoneado** y en `upgrade`: ver *Problemas frecuentes* |
-| La verificación no pasa | Para | En `upgrade` (no se marca `done`) |
-| Respondes "no" entre nodos | Para limpiamente | Los terminados quedan en `done` |
+| `prepare` fails or exceeds `--prepare-timeout` | Shows the prepare log, holds the node and stops | **Untouched**: neither cordoned nor drained. `os-upgrade=hold` |
+| The drain exceeds `--drain-timeout` | Shows the remaining pods and the blocked PDBs. Asks **[w]ait** another interval or **[a]bort** (with `--yes`, it aborts) | On abort: `hold` and **uncordon** (safe: the upgrade had not started) |
+| The Job fails after the upgrade started, or `--node-timeout` is exceeded | Shows the Job conditions and log, and stops | **Cordoned** and in `upgrade`: see [Common problems](#common-problems) |
+| Verification does not pass | Stops | In `upgrade` (not marked `done`) |
+| You answer "no" between nodes | Stops cleanly | Finished nodes stay in `done` |
 
-Para reintentar un nodo apartado tras arreglar la causa: `kubectl label node N os-upgrade-` y
-relanzar el comando.
+To retry a held node after fixing the cause: `kubectl label node N os-upgrade-` and relaunch the
+command.
 
-### Opciones
+### Options
 
-| Opción | Por defecto | Descripción |
+| Option | Default | Description |
 |---|---|---|
-| `--dry-run` | — | No cambia nada: muestra el plan, las acciones (`[dry-run] kubectl ...`) y hace las comprobaciones |
-| `--yes` | — | Sin preguntas. Ante un drain lento, aborta el nodo |
-| `--drain-timeout` | `30m` | Tiempo máximo de drain antes de preguntar |
-| `--prepare-timeout` | `15m` | Tiempo máximo del preflight del nodo |
-| `--node-timeout` | `4h` | Tiempo máximo por nodo (de etiquetar a Plan terminado) |
-| `--skip-net-test` | — | Omite la prueba de DNS (p. ej. si la imagen del Plan no está disponible para pods normales) |
+| `--dry-run` | - | Changes nothing: shows the plan, the actions (`[dry-run] kubectl ...`) and runs the checks |
+| `--yes` | - | No questions. On a slow drain, it aborts the node |
+| `--drain-timeout` | `30m` | Maximum drain time before asking |
+| `--prepare-timeout` | `15m` | Maximum time of the node preflight |
+| `--node-timeout` | `4h` | Maximum time per node (from labeling to Plan finished) |
+| `--skip-net-test` | - | Skips the DNS test (e.g. if the Plan image is not available to regular pods) |
 
-Variables de entorno: `SETTLE_TIMEOUT` (`5m`), `POLL_SECONDS` (`15`), `ETCD_MIN_MEMBERS` (`3`),
-`ETCD_RAFT_MAX_LAG` (`100`), `SNAPSHOT_MAX_AGE_HOURS` (`24`), `NS` (`cattle-system`).
+Environment variables: `SETTLE_TIMEOUT` (`5m`), `POLL_SECONDS` (`15`), `ETCD_MIN_MEMBERS` (`3`),
+`ETCD_RAFT_MAX_LAG` (`100`), `SNAPSHOT_MAX_AGE_HOURS` (`24`), `NS` (`cattle-system`), `KUBECTL`
+(`kubectl`).
 
-La prueba de DNS crea un pod temporal `os-upgrade-nettest-<nodo>` en `cattle-system`, con la
-imagen de los Plans, que ejecuta `getent hosts kubernetes.default.svc.cluster.local`.
+The DNS test creates a temporary pod `os-upgrade-nettest-<node>` in `cattle-system`, with the
+Plans' image, which runs `getent hosts kubernetes.default.svc.cluster.local`.
 
-## 5. Ventana manual: un nodo cada vez
+## 5. Manual window: one node at a time
 
-Orden: **workers → control plane no líderes → control plane líder**.
+Order: **workers → non-leader control planes → leader control plane**.
 
-### 5.1 Lanzar
+### 5.1 Launch
 
 ```sh
 kubectl label node N os-upgrade=upgrade --overwrite
 ```
 
-El Job ejecuta, en este orden:
+The Job runs, in this order:
 
-1. **`prepare`**: preflight sin tocar el nodo (configuración, pre-descarga, espacio, proxy,
-   reboot previo). Si falla, el nodo **no** se cordonea.
-2. **`drain`**: cordon + drain (lo hace el SUC).
+1. **`prepare`**: preflight without touching the node (configuration, predownload, space, proxy,
+   prior reboot). If it fails, the node is **not** cordoned.
+2. **`drain`**: cordon + drain (done by the SUC).
 3. **`upgrade`**:
-   - quita los metapaquetes de kernel y aplica el pin;
-   - lleva 22.04 al último parche;
-   - lanza en el host la unidad `os-upgrade-release` (`do-release-upgrade` con la caché
-     pre-descargada, instalación del kernel fijado, GRUB);
-   - reinicia **una vez**.
-4. Tras el reboot el Job crea otro pod, que verifica, limpia y termina con éxito. El SUC hace el
-   uncordon.
+   - removes the kernel metapackages and applies the pin;
+   - brings the source release to the latest patch level;
+   - starts the `os-upgrade-release` unit on the host (`do-release-upgrade` with the
+     predownloaded cache, installation of the pinned kernel, GRUB);
+   - reboots **once**.
+4. After the reboot the Job creates another pod, which verifies, cleans up and finishes
+   successfully. The SUC uncordons the node.
 
-### 5.2 Seguir
+### 5.2 Follow
 
 ```sh
 kubectl -n $NS get jobs,pods -l upgrade.cattle.io/node=N -o wide -w
@@ -223,262 +223,267 @@ kubectl -n $NS logs -l upgrade.cattle.io/node=N -c prepare
 kubectl -n $NS logs -l upgrade.cattle.io/node=N -c upgrade -f
 ```
 
-Los logs del pod marcan cada paso (`PASO 1/7` ... `PASO 7/7`). Durante el release upgrade, el
-pod solo dice `Release upgrade en curso`. El detalle está en el nodo:
+The pod logs mark each step (`STEP 1/7` ... `STEP 7/7`). During the release upgrade, the pod only
+says `Release upgrade in progress`. The details are on the node:
 
 ```sh
-journalctl -fu os-upgrade-release          # unidad del host
-tail -f /var/log/os-upgrade.log            # todas las fases, una línea ts=... node=... phase=... level=... msg="..."
+journalctl -fu os-upgrade-release          # host unit
+tail -f /var/log/os-upgrade.log            # all phases, one line ts=... node=... phase=... level=... msg="..."
 grep 'level=WARN\|level=ERROR' /var/log/os-upgrade.log
-tail -f /var/log/dist-upgrade/main.log     # log del upgrader de Ubuntu
-sh /usr/local/sbin/os-upgrade.sh status    # resumen del estado (incluye el informe final)
+tail -f /var/log/dist-upgrade/main.log     # Ubuntu upgrader log
+sh /usr/local/sbin/os-upgrade.sh status    # state summary (includes the final report)
 ```
 
-Al terminar, cada nodo guarda un informe en `/var/log/os-upgrade-report.txt`:
-- duración y número de reboots;
-- versiones de sistema y kernel;
-- resultado del hook;
-- fuentes de apt que el upgrade desactivó;
-- paquetes retenidos.
+At the end, each node keeps a report in `/var/log/os-upgrade-report.txt`:
+- duration and number of reboots;
+- system and kernel versions;
+- hook result;
+- apt sources the upgrade disabled;
+- held packages.
 
-### 5.3 Comprobar que terminó
+### 5.3 Check that it finished
 
 ```sh
-PLAN=os-upgrade-workers    # u os-upgrade-cp
+PLAN=os-upgrade-workers    # or os-upgrade-cp
 kubectl -n $NS get plan $PLAN -o jsonpath='{.status.latestHash}'; echo
 kubectl get node N -o jsonpath="{.metadata.labels.plan\.upgrade\.cattle\.io/$PLAN}"; echo
 ```
 
-Si los dos hashes coinciden, el Plan terminó en ese nodo. En el Plan de control plane, el label
-aparece tras `postCompleteDelay` (10 min); el uncordon es inmediato. Verificar:
+If both hashes match, the Plan finished on that node. In the control plane Plan, the label
+appears after `postCompleteDelay` (10 min); the uncordon is immediate. Verify:
 
 ```sh
 kubectl get node N -o wide                 # Ready, OS-IMAGE Ubuntu 24.04, KERNEL 6.8.0-139-generic
-kubectl get pods -A -o wide --field-selector spec.nodeName=N | grep -v Running   # sin pods rotos
-sh scripts/check-cluster.sh                # control plane: 3 miembros etcd sanos y un líder
+kubectl get pods -A -o wide --field-selector spec.nodeName=N | grep -v Running   # no broken pods
+sh scripts/check-cluster.sh                # control plane: 3 healthy etcd members and one leader
 ```
 
-### 5.4 Cerrar el nodo
+### 5.4 Close the node
 
 ```sh
 kubectl label node N os-upgrade=done --overwrite
 ```
 
-**Imprescindible:** sin este cambio, cualquier cambio futuro de los Plans (otro hash) volvería a
-lanzar el proceso en ese nodo.
+**Mandatory:** without it, any future change of the Plans (another hash) would launch the
+process on that node again.
 
-### 5.5 Control plane líder
+### 5.5 Leader control plane
 
-Antes de lanzar el nodo líder de etcd, mover el liderazgo a otro miembro ya actualizado. El
-contenedor de etcd de RKE2 **no tiene `/bin/sh`**: `etcdctl` se ejecuta directamente con
-`kubectl exec`, sin `sh -c`.
+Before launching the etcd leader node, move the leadership to another member that is already
+upgraded. The RKE2 etcd container **has no `/bin/sh`**: `etcdctl` runs directly with
+`kubectl exec`, without `sh -c`.
 
 ```sh
 POD=$(kubectl -n kube-system get pod -l component=etcd -o name | head -n1)
 CERTS="--cacert /var/lib/rancher/rke2/server/tls/etcd/server-ca.crt --cert /var/lib/rancher/rke2/server/tls/etcd/server-client.crt --key /var/lib/rancher/rke2/server/tls/etcd/server-client.key"
-kubectl -n kube-system exec $POD -- etcdctl $CERTS endpoint status --cluster -w table   # IS LEADER e ID
-kubectl -n kube-system exec $POD -- etcdctl $CERTS --endpoints=https://<IP-del-lider>:2379 move-leader <ID-hex-destino>
-kubectl -n kube-system exec $POD -- etcdctl $CERTS endpoint status --cluster -w table   # comprobar el cambio
+kubectl -n kube-system exec $POD -- etcdctl $CERTS endpoint status --cluster -w table   # IS LEADER and ID
+kubectl -n kube-system exec $POD -- etcdctl $CERTS --endpoints=https://<leader-IP>:2379 move-leader <target-hex-ID>
+kubectl -n kube-system exec $POD -- etcdctl $CERTS endpoint status --cluster -w table   # check the change
 ```
 
-(`$CERTS` va sin comillas a propósito: son varias opciones.) Luego seguir con 5.1.
+(`$CERTS` is unquoted on purpose: it holds several options.) Then continue with 5.1.
 
-## 6. Ventana manual: por grupos
+## 6. Manual window: by groups
 
-Es la alternativa manual al paso 5 cuando hay muchos nodos (con `rollout.sh`, basta con `--group`). Se etiqueta un grupo entero de una vez y el
-SUC los procesa **de uno en uno** (`concurrency: 1`), sin esperar confirmación entre nodos.
+This is the manual alternative to step 5 when there are many nodes (with `rollout.sh`, `--group`
+is enough). A whole group is labeled at once and the SUC processes it **one node at a time**
+(`concurrency: 1`), without waiting for confirmation between nodes.
 
-### Cómo se comporta el SUC con un grupo (v0.16.3)
+### How the SUC behaves with a group (v0.16.3)
 
-- **Uno detrás de otro:** cuando un nodo termina, el SUC empieza el siguiente del mismo Plan. No
-  verifica nada más entre medias (en el control plane espera `postCompleteDelay: 10m`).
-- **Orden no controlable:** dentro de un Plan, el SUC ordena los nodos por un hash de su UID, no
-  por nombre. Si el orden importa, separa los nodos en grupos distintos.
-- **Un fallo para el grupo:** un nodo cuyo Job falla sigue ocupando el hueco de `concurrency: 1`
-  y el SUC no empieza otro. Pero si se le **quita el label** a ese nodo, el SUC pasa al
-  siguiente del grupo (ver *Pausar o detener un grupo*).
-- **Workers y control plane van en paralelo:** son Plans distintos y `exclusive` no los
-  serializa. Un grupo debe ser **solo de workers o solo de control plane**, y no se lanza un grupo
-  de un tipo mientras haya otro del otro tipo en curso.
+- **One after another:** when a node finishes, the SUC starts the next one of the same Plan. It
+  does not verify anything else in between (on the control plane it waits `postCompleteDelay:
+  10m`).
+- **Order cannot be controlled:** within a Plan, the SUC orders nodes by a hash of their UID, not
+  by name. If the order matters, put the nodes in different groups.
+- **A failure stops the group:** a node whose Job fails keeps occupying the `concurrency: 1` slot
+  and the SUC does not start another one. But if its **label is removed**, the SUC moves on to
+  the next node of the group (see *Pause or stop a group*).
+- **Workers and control planes run in parallel:** they are different Plans and `exclusive` does
+  not serialize them. A group must be **only workers or only control planes**, and do not launch
+  a group of one kind while one of the other kind is in progress.
 
-### Reglas para formar los grupos
+### Rules for building the groups
 
-1. **Grupo 1 = canario:** 1 o 2 workers. Verificarlos a fondo (5.3) antes de seguir.
-2. **Workers:** grupos del tamaño que podáis vigilar en la ventana. Se drena de uno en uno, así
-   que la capacidad del cluster solo pierde un nodo cada vez.
-3. **Control plane no líderes:** pueden ir juntos en un grupo (el SUC los hace de uno en uno con
-   10 min entre ellos). Con 3 control plane, son 2 nodos.
-4. **Control plane líder:** siempre en un grupo propio, después de `move-leader` (5.5).
-5. **Nodos con todos los roles:** cuentan como control plane (Plan `os-upgrade-cp`).
+1. **Group 1 = canary:** 1 or 2 workers. Verify them thoroughly (5.3) before continuing.
+2. **Workers:** groups of a size you can watch during the window. Nodes are drained one at a
+   time, so the cluster only loses one node of capacity at a time.
+3. **Non-leader control planes:** they can go together in one group (the SUC does them one at a
+   time with 10 min between them). With 3 control planes, that is 2 nodes.
+4. **Leader control plane:** always in a group of its own, after `move-leader` (5.5).
+5. **All-roles nodes:** count as control planes (Plan `os-upgrade-cp`).
 
-### Lanzar un grupo
+### Launch a group
 
-El selector excluye los nodos ya terminados (`done`) y los apartados (`hold`), así que relanzar
-un grupo nunca repite nodos:
+The selector excludes finished (`done`) and held (`hold`) nodes, so relaunching a group never
+repeats nodes:
 
 ```sh
 G=2
 SEL="os-upgrade-group=$G,os-upgrade notin (done,hold)"
-kubectl get nodes -l "$SEL" -L os-upgrade        # revisar qué nodos entran
+kubectl get nodes -l "$SEL" -L os-upgrade        # review which nodes are included
 kubectl label node -l "$SEL" os-upgrade=upgrade --overwrite
 ```
 
-### Seguir el grupo
+### Follow the group
 
 ```sh
-PLAN=os-upgrade-workers    # u os-upgrade-cp
+PLAN=os-upgrade-workers    # or os-upgrade-cp
 H=$(kubectl -n $NS get plan $PLAN -o jsonpath='{.status.latestHash}')
-kubectl -n $NS get plan $PLAN -o jsonpath='{.status.applying}'; echo   # nodo en curso
+kubectl -n $NS get plan $PLAN -o jsonpath='{.status.applying}'; echo   # node in progress
 kubectl get nodes -l os-upgrade-group=$G -L os-upgrade -L plan.upgrade.cattle.io/$PLAN
-kubectl get nodes -l "os-upgrade-group=$G,plan.upgrade.cattle.io/$PLAN=$H"   # terminados
+kubectl get nodes -l "os-upgrade-group=$G,plan.upgrade.cattle.io/$PLAN=$H"   # finished
 kubectl -n $NS get jobs -l upgrade.cattle.io/plan=$PLAN -w
 ```
 
-El seguimiento de cada nodo (logs, `journalctl`, `status`) es el mismo que en 5.2.
+Following each node (logs, `journalctl`, `status`) is the same as in 5.2.
 
-### Cerrar el grupo
+### Close the group
 
-Cuando todos los nodos del grupo estén terminados y verificados (5.3), se marcan como `done`.
-El selector solo incluye los nodos cuyo hash coincide con el del Plan, así que nunca marca uno a
-medias:
+When all the group's nodes are finished and verified (5.3), mark them `done`. The selector only
+includes nodes whose hash matches the Plan's, so it never marks a node halfway through:
 
 ```sh
 kubectl label node -l "os-upgrade-group=$G,plan.upgrade.cattle.io/$PLAN=$H" os-upgrade=done --overwrite
-kubectl get nodes -l os-upgrade-group=$G -L os-upgrade     # todos deben estar en done
+kubectl get nodes -l os-upgrade-group=$G -L os-upgrade     # all must be done
 sh scripts/check-cluster.sh
 ```
 
-Pasar al siguiente grupo solo con el cluster sano.
+Move to the next group only with a healthy cluster.
 
-### Pausar o detener un grupo
+### Pause or stop a group
 
-Quitar el label a los nodos que **todavía no han empezado**. El que está en curso termina su
-proceso (no se puede parar un release upgrade a medias):
+Remove the label from the nodes that **have not started yet**. The one in progress finishes its
+process (a release upgrade cannot be stopped halfway):
 
 ```sh
 APPLYING=$(kubectl -n $NS get plan $PLAN -o jsonpath='{.status.applying[*]}')
 for n in $(kubectl get nodes -l "os-upgrade-group=$G,os-upgrade=upgrade" -o name | cut -d/ -f2); do
-  case " $APPLYING " in *" $n "*) echo "en curso, se deja: $n" ;; *) kubectl label node "$n" os-upgrade- ;; esac
+  case " $APPLYING " in *" $n "*) echo "in progress, left as is: $n" ;; *) kubectl label node "$n" os-upgrade- ;; esac
 done
 ```
 
-Para reanudar, se lanza el grupo otra vez con el mismo comando de *Lanzar un grupo*: solo
-entran los nodos pendientes.
+To resume, launch the group again with the command in *Launch a group*: only pending nodes are
+included.
 
-### Si un nodo del grupo falla
+### If a node of the group fails
 
-El grupo se queda parado en ese nodo (ocupa el hueco). Opciones:
+The group stops on that node (it occupies the slot). Options:
 
-- **Arreglarlo y continuar:** ver *Problemas frecuentes*. Cuando termine, el SUC sigue con el
-  resto del grupo.
-- **Apartarlo y que el grupo siga:** primero **pausar** el grupo (si no, el SUC empezará otro
-  nodo en cuanto se libere el hueco). Después apartar el nodo fallido con
-  `kubectl label node N os-upgrade=hold --overwrite` (ningún Plan lo selecciona y el relanzamiento
-  del grupo lo excluye), revisarlo aparte y reanudar el grupo. Cuando esté arreglado, se lanza
-  solo: `kubectl label node N os-upgrade=upgrade --overwrite`.
+- **Fix it and continue:** see [Common problems](#common-problems). When it finishes, the SUC
+  continues with the rest of the group.
+- **Set it aside and let the group continue:** first **pause** the group (otherwise the SUC will
+  start another node as soon as the slot frees up). Then set the failed node aside with
+  `kubectl label node N os-upgrade=hold --overwrite` (no Plan selects it and relaunching the
+  group excludes it), review it separately and resume the group. Once fixed, launch it alone:
+  `kubectl label node N os-upgrade=upgrade --overwrite`.
 
-## 7. Final de la campaña
+## 7. End of the campaign
 
-- Todos los nodos con `os-upgrade=done` y `sh scripts/check-cluster.sh` sano.
-- Opcional: `kubectl delete -f out/<cluster>.yaml` y quitar los labels (`kubectl label node N os-upgrade-`).
-  Lo que garantiza el kernel (pin, hold, GRUB) queda en los nodos.
-- Reactivar los upgrades de RKE2 en Rancher.
+- All nodes with `os-upgrade=done` and `sh scripts/check-cluster.sh` healthy.
+- Optional: `kubectl delete -f out/<cluster>.yaml` and remove the labels
+  (`kubectl label node N os-upgrade-`). What keeps the kernel in place (pin, hold, GRUB) stays on
+  the nodes.
+- Re-enable RKE2 upgrades in Rancher.
 
 ---
 
-## Problemas frecuentes
+## Common problems
 
-Si un nodo no se puede arreglar, ver [rollback.md](rollback.md).
+If a node cannot be fixed, see [rollback.md](rollback.md).
 
-Regla general: el proceso deja una **marca de fallo** (`/var/lib/os-upgrade/failed`) cuando hace
-falta una persona. Con la marca puesta, los reintentos no hacen nada.
+General rule: the process leaves a **failure mark** (`/var/lib/os-upgrade/failed`) when a person
+is needed. While the mark is present, retries do nothing.
 
 ```sh
-cat /var/lib/os-upgrade/failed                 # motivo
-sh /usr/local/sbin/os-upgrade.sh reset-failed  # tras arreglarlo: borra marca y contador de reboots
-kubectl -n $NS delete job <job>                # el SUC crea un Job nuevo y el proceso continúa
+cat /var/lib/os-upgrade/failed                 # reason
+sh /usr/local/sbin/os-upgrade.sh reset-failed  # after fixing it: clears the mark and the reboot counter
+kubectl -n $NS delete job <job>                # the SUC creates a new Job and the process continues
 ```
 
-Si `/usr/local/sbin/os-upgrade.sh` aún no existe, el fallo fue antes de copiarlo y no hay marca.
+If `/usr/local/sbin/os-upgrade.sh` does not exist yet, the failure happened before it was copied
+and there is no mark.
 
-### Falla `prepare` (el nodo no se ha tocado)
+### `prepare` fails (the node was not touched)
 
-| Mensaje | Causa y solución |
+| Message | Cause and fix |
 |---|---|
-| `falta la pre-descarga para ...` | No se hizo el paso 3 o se hizo con otro `KERNEL_VERSION`. Hacerlo, o poner `REQUIRE_PREDOWNLOAD=false` |
-| `el nodo necesitaría un reboot previo por: ...` | Ver paso 2. Parchear y reiniciar el nodo en la ventana de parches |
-| `espacio libre insuficiente en ...` | Liberar espacio (`apt-get clean`, kernels viejos, logs) |
-| `apt-get update falló` | Proxy o mirror: revisar `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` |
-| `el mirror de Ubuntu del nodo (...) no es un mirror público` | Mirror interno con `ALLOW_THIRD_PARTY=false`: el upgrade lo cambiaría a `archive.ubuntu.com`. Usar `ALLOW_THIRD_PARTY=true` ([configuracion.md](configuracion.md#fuentes-de-apt-mirror-interno-y-repos-de-terceros)) |
-| `el hook post-upgrade tiene errores de sintaxis` | Corregir `post-upgrade-hook.sh` del overlay, `make validate` y `kubectl apply` |
-| `KERNEL_VERSION ...` | Configuración del overlay; corregir, `make validate` y `kubectl apply` |
-| `el nodo está en 22.04 y el destino es 26.04` | `do-release-upgrade` solo salta una LTS: pasar ese nodo antes por una campaña a 24.04 |
+| `predownload missing for ...` | Step 3 was not done, or it was done with another `KERNEL_VERSION`. Run it, or set `REQUIRE_PREDOWNLOAD=false` |
+| `the node would need a prior reboot because of: ...` | See step 2. Patch and reboot the node in the patching window |
+| `not enough free space on ...` | Free up space (`apt-get clean`, old kernels, logs) |
+| `apt-get update failed (proxy or mirror unreachable?)` | Proxy or mirror: check `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` |
+| `the node Ubuntu mirror (...) is not a public mirror` | Internal mirror with `ALLOW_THIRD_PARTY=false`: the upgrade would switch it to `archive.ubuntu.com`. Use `ALLOW_THIRD_PARTY=true` ([configuration.md](configuration.md#apt-sources-internal-mirror-and-third-party-repos)) |
+| `the post-upgrade hook has syntax errors` | Fix the overlay's `post-upgrade-hook.sh`, `make validate` and `kubectl apply` |
+| `KERNEL_VERSION ...` | Overlay configuration; fix it, `make validate` and `kubectl apply` |
+| `the node is on 22.04 and the target is 26.04` | `do-release-upgrade` only jumps one LTS: take that node through a campaign to 24.04 first |
 
-Para reintentar tras arreglarlo: `kubectl -n $NS delete job <job>`. Para dejar el nodo para más
-tarde: `kubectl label node N os-upgrade-` y borrar el Job.
+To retry after fixing it: `kubectl -n $NS delete job <job>`. To leave the node for later:
+`kubectl label node N os-upgrade-` and delete the Job.
 
-### El Job falló después del drain (nodo cordoneado)
+### The Job failed after the drain (node cordoned)
 
-El SUC solo hace el uncordon si el Job termina bien. Antes de nada, comprobar si el proceso sigue
-vivo en el host:
+The SUC only uncordons the node if the Job succeeds. First of all, check whether the process is
+still alive on the host:
 
 ```sh
 systemctl status os-upgrade-release
 sh /usr/local/sbin/os-upgrade.sh status
 ```
 
-- **Deadline vencido (`DeadlineExceeded`) con la unidad activa:** el upgrade sigue en el host y
-  acabará reiniciando el nodo. **No hacer uncordon.** Esperar a que termine
-  (`journalctl -fu os-upgrade-release`) y luego borrar el Job para que el SUC lo recree, verifique
-  y haga el uncordon. Para la próxima vez, subir `jobActiveDeadlineSecs`.
-- **`do-release-upgrade terminó con error`:** revisar `/var/log/dist-upgrade/main.log` y
-  `apt.log`. Con frecuencia es un repositorio de terceros o un paquete retenido. Si el sistema
-  sigue en 22.04 y dpkg está sano (`lsb_release -r` dice 22.04 y `dpkg --audit` sale vacío):
-  arreglar la causa, `reset-failed`, `rm /var/lib/os-upgrade/release-upgrade.started` (confirma
-  que no quedó nada a medias) y borrar el Job.
-- **`el release upgrade empezó y no terminó`:** hubo un corte o reboot a mitad. **No se reintenta
-  automáticamente.** Revisar a mano (`dpkg --configure -a`, `apt-get -f install`,
-  `/var/log/dist-upgrade/`). Si el sistema queda consistente en 24.04: `reset-failed`, borrar
-  `/var/lib/os-upgrade/release-upgrade.started` y borrar el Job (instalará el kernel y reiniciará).
-  Si no, reinstalar el nodo.
-- **`no hay entrada de GRUB para ...` / `grub.cfg no tomó GRUB_DEFAULT`:** el nodo está en 24.04
-  pero **no se ha reiniciado**. Revisar `update-grub`, `/etc/default/grub` y
-  `/etc/default/grub.d/`. Tras arreglarlo: `reset-failed` y borrar el Job.
-- **`demasiados reboots`:** el nodo no arranca el kernel fijado. Revisar
-  `grep GRUB_DEFAULT /etc/default/grub.d/*` y `uname -r`, y el menú de GRUB por la consola del
-  servidor.
-- **`dpkg --audit reporta paquetes a medio instalar`:** `dpkg --configure -a`, revisar y
+- **Deadline exceeded (`DeadlineExceeded`) with the unit active:** the upgrade is still running
+  on the host and will reboot the node. **Do not uncordon.** Wait until it finishes
+  (`journalctl -fu os-upgrade-release`) and then delete the Job so the SUC recreates it,
+  verifies and uncordons. Next time, raise `jobActiveDeadlineSecs`.
+- **`do-release-upgrade ended with an error`:** check `/var/log/dist-upgrade/main.log` and
+  `apt.log`. Often it is a third-party repository or a held package. If the system is still on
+  the source release and dpkg is healthy (`lsb_release -r` shows the source release and
+  `dpkg --audit` prints nothing): fix the cause, `reset-failed`,
+  `rm /var/lib/os-upgrade/release-upgrade.started` (this confirms nothing was left halfway) and
+  delete the Job.
+- **`the release upgrade started and did not finish`:** there was a power cut or a reboot halfway.
+  **It is not retried automatically.** Check by hand (`dpkg --configure -a`,
+  `apt-get -f install`, `/var/log/dist-upgrade/`). If the system ends up consistent on the target
+  release: `reset-failed`, delete `/var/lib/os-upgrade/release-upgrade.started` and delete the
+  Job (it will install the kernel and reboot). Otherwise, reinstall the node.
+- **`no GRUB entry for ...` / `grub.cfg did not pick up GRUB_DEFAULT`:** the node is on the target
+  release but **has not rebooted**. Check `update-grub`, `/etc/default/grub` and
+  `/etc/default/grub.d/`. After fixing it: `reset-failed` and delete the Job.
+- **`too many reboots`:** the node does not boot the pinned kernel. Check
+  `grep GRUB_DEFAULT /etc/default/grub.d/*` and `uname -r`, and the GRUB menu through the
+  server console.
+- **`dpkg --audit reports half-installed packages`:** `dpkg --configure -a`, review and
   `reset-failed`.
-- **`el hook post-upgrade falló N veces`:** el nodo ya está en 24.04 con el kernel fijado, pero
-  la comprobación propia no pasa. Su salida está en `grep 'msg="hook:' /var/log/os-upgrade.log`.
-  Arreglar la causa en el nodo, `reset-failed` y borrar el Job: el siguiente intento solo cierra
-  (vuelve a ejecutar el hook, sin reboot).
-- **Abandonar el nodo por ahora:** `kubectl label node N os-upgrade-`, borrar el Job y
-  `kubectl uncordon N` **solo si** `systemctl is-active os-upgrade-release` dice `inactive`.
+- **`the post-upgrade hook failed N times`:** the node is already on the target release with the
+  pinned kernel, but your own check does not pass. Its output is in
+  `grep 'msg="hook:' /var/log/os-upgrade.log`. Fix the cause on the node, `reset-failed` and
+  delete the Job: the next attempt only finalizes (it runs the hook again, without a reboot).
+- **Leave the node for now:** `kubectl label node N os-upgrade-`, delete the Job and
+  `kubectl uncordon N` **only if** `systemctl is-active os-upgrade-release` says `inactive`.
 
-### Fuentes de apt desactivadas tras el upgrade
+### Apt sources disabled after the upgrade
 
-Aviso `fuentes desactivadas por el upgrade` (también en el informe del nodo): el upgrader las
-comentó (`# ... disabled on upgrade to noble` en `.list`) o les puso `Enabled: no` (en
-`.sources`) porque no publican `noble` o porque `ALLOW_THIRD_PARTY=false`. No impide terminar.
-Si hacen falta, comprobar que el proveedor tiene paquetes para 24.04 y reactivarlas a mano
-cambiando `jammy` por `noble`.
+Warning `sources disabled by the upgrade` (also in the node report): the upgrader commented them
+out (`# ... disabled on upgrade to <codename>` in `.list` files) or set `Enabled: no` (in
+`.sources` files) because they do not publish the target codename or because
+`ALLOW_THIRD_PARTY=false`. It does not prevent finishing. If you need them, check that the vendor
+has packages for the target release and re-enable them by hand, replacing the source codename
+with the target one (e.g. `jammy` with `noble`).
 
-### `rke2 no está activo tras N s`
+### `rke2 is not active after N s`
 
-Tras el reboot, el cierre espera hasta 10 min a que rke2 termine de arrancar: un control plane
-tarda en volver a unirse a etcd. Si no arranca en ese tiempo, el intento falla **sin marcar el
-nodo** y el Job lo reintenta. Revisar `systemctl status rke2-server` (o `rke2-agent`) y
+After the reboot, finalize waits up to 10 min for rke2 to finish starting: a control plane takes
+a while to rejoin etcd. If it does not start in that time, the attempt fails **without marking the
+node** and the Job retries it. Check `systemctl status rke2-server` (or `rke2-agent`) and
 `journalctl -u rke2-server`.
 
-### El pod del Job está en `Pending` o `ImagePullBackOff`
+### The Job pod is `Pending` or `ImagePullBackOff`
 
-- **Imagen:** la de los Jobs viene de Docker Hub por defecto. En clusters sin salida, configurar
-  `images:` en el overlay ([configuracion.md](configuracion.md)).
-- **Drain bloqueado:** el contenedor `drain` no termina si un PodDisruptionBudget lo impide.
+- **Image:** the Job image comes from Docker Hub by default. In clusters without internet
+  access, set `images:` in the overlay ([configuration.md](configuration.md)).
+- **Drain blocked:** the `drain` container does not finish if a PodDisruptionBudget prevents it.
   `kubectl -n $NS logs <pod> -c drain`.
 
-### etcd degradado durante el control plane
+### etcd degraded during the control plane
 
-Parar: no etiquetar más nodos. `sh scripts/check-cluster.sh`. Si un miembro no vuelve tras el
-reboot, revisar `journalctl -u rke2-server` en ese nodo antes de tocar etcd.
+Stop: do not label more nodes. `sh scripts/check-cluster.sh`. If a member does not come back after
+the reboot, check `journalctl -u rke2-server` on that node before touching etcd.
