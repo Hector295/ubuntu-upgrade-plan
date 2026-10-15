@@ -1,12 +1,12 @@
 #!/bin/sh
-# Lab reproducible con libvirt: VMs Ubuntu 22.04 con RKE2 y el system-upgrade-controller
+# Lab reproducible con libvirt: VMs Ubuntu (22.04 o 24.04) con RKE2 y el system-upgrade-controller
 # oficial (v0.16.3), para probar os-upgrade de principio a fin sin tocar ningún cluster real.
 #
 # Uso: lab/lab.sh <comando>
 #   plan        muestra lo que se crearía (no cambia nada)
 #   up          crea las VMs, instala RKE2, el SUC y deja el kubeconfig en $LAB_DIR
 #   e2e         render + validación + apply + preflight + predownload + upgrade de todos los
-#               nodos con rollout.sh, y comprueba que quedan en 24.04 con el kernel fijado
+#               nodos con rollout.sh, y comprueba que quedan en la versión destino con el kernel fijado
 #   status      VMs del lab y nodos del cluster
 #   env         imprime los export para usar kubectl/rollout.sh contra el lab
 #   ssh <vm>    ssh a una VM del lab (p. ej. osu-lab-cp1)
@@ -17,6 +17,7 @@
 # Configuración (variables de entorno):
 #   LAB_CP=3 LAB_WORKERS=1 LAB_CPUS=2 LAB_MEM_MB=4096 LAB_DISK_GB=30
 #   LAB_UEFI=false (true: las VMs arrancan con UEFI, para probar GRUB como en bare metal UEFI)
+#   LAB_UBUNTU=22.04 (24.04: VMs en noble, para probar 24.04 -> 26.04 con LAB_OVERLAY=.../lab-vm-2604)
 #   LAB_RKE2_VERSION=v1.33.13+rke2r2 (vacío: usar el canal LAB_RKE2_CHANNEL, p. ej. v1.33)
 #   LAB_POOL=default LAB_NET=default LIBVIRT_DEFAULT_URI=qemu:///system
 #   LAB_DIR=<repo>/.lab LAB_PREFIX=osu-lab
@@ -31,6 +32,7 @@ LAB_CPUS="${LAB_CPUS:-2}"
 LAB_MEM_MB="${LAB_MEM_MB:-4096}"
 LAB_DISK_GB="${LAB_DISK_GB:-30}"
 LAB_UEFI="${LAB_UEFI:-false}"
+LAB_UBUNTU="${LAB_UBUNTU:-22.04}"
 LAB_POOL="${LAB_POOL:-default}"
 LAB_NET="${LAB_NET:-default}"
 LAB_RKE2_CHANNEL="${LAB_RKE2_CHANNEL:-v1.33}"
@@ -39,9 +41,14 @@ LAB_RKE2_VERSION="${LAB_RKE2_VERSION-v1.33.13+rke2r2}"
 LAB_OVERLAY="${LAB_OVERLAY:-$REPO_DIR/manifests/overlays/lab-vm}"
 export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 
-IMAGE_URL=https://cloud-images.ubuntu.com/releases/jammy/release
-IMAGE_NAME=ubuntu-22.04-server-cloudimg-amd64.img
-BASE_VOL="$LAB_PREFIX-base-jammy.qcow2"
+case "$LAB_UBUNTU" in
+  22.04) LAB_CODENAME=jammy ;;
+  24.04) LAB_CODENAME=noble ;;
+  *) echo "LAB_UBUNTU no soportado: $LAB_UBUNTU (22.04 o 24.04)" >&2; exit 2 ;;
+esac
+IMAGE_URL="https://cloud-images.ubuntu.com/releases/$LAB_CODENAME/release"
+IMAGE_NAME="ubuntu-$LAB_UBUNTU-server-cloudimg-amd64.img"
+BASE_VOL="$LAB_PREFIX-base-$LAB_CODENAME.qcow2"
 SUC_URL=https://github.com/rancher/system-upgrade-controller/releases/download/v0.16.3
 SUC_CRD_SHA=d26cb57b27012e7ea2992e10707741e36c3eb2031bf8b41aaf7d1e611c878376
 SUC_YAML_SHA=e08b240b349ffac89dd2a1a3276211711aabe3433eb253c712d592b74ce7595d
@@ -173,7 +180,7 @@ create_vm() {
   virt-install --name "$name" --memory "$LAB_MEM_MB" --vcpus "$LAB_CPUS" --import $boot \
     --disk "vol=$LAB_POOL/$name.qcow2,bus=virtio" \
     --disk "vol=$LAB_POOL/$name-seed.iso,device=cdrom" \
-    --os-variant ubuntu22.04 --network "network=$LAB_NET,model=virtio" \
+    --os-variant "ubuntu$LAB_UBUNTU" --network "network=$LAB_NET,model=virtio" \
     --graphics none --noautoconsole >/dev/null
 }
 
@@ -249,7 +256,7 @@ cmd_plan() {
   echo "Lab '$LAB_PREFIX' en $LIBVIRT_DEFAULT_URI (pool $LAB_POOL, red $LAB_NET):"
   for n in $(cp_names); do echo "  $n  control plane + etcd  ${LAB_CPUS} CPU ${LAB_MEM_MB} MB ${LAB_DISK_GB} GB"; done
   for n in $(worker_names); do echo "  $n  worker                ${LAB_CPUS} CPU ${LAB_MEM_MB} MB ${LAB_DISK_GB} GB"; done
-  echo "  imagen: $IMAGE_NAME (volumen $BASE_VOL), arranque $( [ "$LAB_UEFI" = true ] && echo UEFI || echo BIOS)"
+  echo "  Ubuntu $LAB_UBUNTU ($LAB_CODENAME); imagen: $IMAGE_NAME (volumen $BASE_VOL), arranque $( [ "$LAB_UEFI" = true ] && echo UEFI || echo BIOS)"
   echo "  RKE2: ${LAB_RKE2_VERSION:-canal $LAB_RKE2_CHANNEL}; SUC v0.16.3 en $SUC_NS"
   echo "  total: $(( (LAB_CP + LAB_WORKERS) * LAB_MEM_MB )) MB de RAM, $(( (LAB_CP + LAB_WORKERS) * LAB_CPUS )) vCPU"
   echo "  estado local: $LAB_DIR"
@@ -339,6 +346,7 @@ cmd_e2e() {
   sh "$REPO_DIR/scripts/validate-manifests.sh" "$out" "$LAB_DIR/schema"
   "$KUBECTL" apply -f "$out" >/dev/null
   kernel=$("$TOOLS_BIN/yq" 'select(.kind == "ConfigMap") | .data.KERNEL_VERSION' "$out")
+  target=$("$TOOLS_BIN/yq" 'select(.kind == "ConfigMap") | .data.TARGET_VERSION' "$out")
 
   sh "$REPO_DIR/scripts/preflight.sh"
   for g in 1 2; do
@@ -349,11 +357,11 @@ cmd_e2e() {
   done
 
   info "Comprobación final"
-  bad=$("$KUBECTL" get nodes -o json | "$TOOLS_BIN/yq" -p json ".items[] | select((.status.nodeInfo.osImage | test(\"Ubuntu 24.04\") | not) or .status.nodeInfo.kernelVersion != \"$kernel\") | .metadata.name")
+  bad=$("$KUBECTL" get nodes -o json | "$TOOLS_BIN/yq" -p json ".items[] | select((.status.nodeInfo.osImage | test(\"Ubuntu $target\") | not) or .status.nodeInfo.kernelVersion != \"$kernel\") | .metadata.name")
   sh "$REPO_DIR/scripts/check-cluster.sh" >/dev/null || die "check-cluster.sh reporta problemas"
   [ -z "$bad" ] || die "nodos sin actualizar: $bad"
   sh "$REPO_DIR/scripts/rollout.sh" status
-  info "E2E OK en $(( ($(date +%s) - start) / 60 )) min: todos los nodos en Ubuntu 24.04 con $kernel"
+  info "E2E OK en $(( ($(date +%s) - start) / 60 )) min: todos los nodos en Ubuntu $target con $kernel"
 }
 
 cmd_down() {

@@ -73,3 +73,15 @@ setup() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"ejecutar antes 'lab/lab.sh up'"* ]]
 }
+
+@test "lab plan: LAB_UBUNTU=24.04 usa la imagen y el volumen base de noble" {
+  run env LAB_UBUNTU=24.04 sh "$LAB" plan
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Ubuntu 24.04 (noble); imagen: ubuntu-24.04-server-cloudimg-amd64.img (volumen osu-lab-base-noble.qcow2)"* ]]
+}
+
+@test "lab: LAB_UBUNTU no soportado se rechaza" {
+  run env LAB_UBUNTU=20.04 sh "$LAB" plan
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"LAB_UBUNTU no soportado: 20.04"* ]]
+}
