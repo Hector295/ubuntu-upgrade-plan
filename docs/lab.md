@@ -9,7 +9,7 @@ cluster real.
 
 - libvirt con KVM: `virsh`, `virt-install`, `genisoimage`. Tu usuario en el grupo `libvirt`.
   Se usa `qemu:///system`, el pool `default` y la red `default` (NAT con DHCP).
-- `kubectl`, `ssh`, `curl` y `make tools`.
+- `ssh`, `curl` y `make tools` (el lab usa el `kubectl` fijado en `tools/bin`, v1.33).
 - Recursos con la topología por defecto (3 control plane + 1 worker): **16 GB de RAM, 8 vCPU** y
   unos 10 GB de disco en el pool (discos en copia sobre una imagen base común).
 - Salida a internet desde las VMs: imagen de Ubuntu, RKE2, imagen `ubuntu:24.04` de los Jobs y
@@ -32,7 +32,8 @@ Topología y versión, por variables de entorno:
 
 ```sh
 LAB_CP=1 LAB_WORKERS=1 lab/lab.sh up          # versión mínima (8 GB): sin move-leader
-LAB_RKE2_VERSION=v1.33.13+rke2r1 lab/lab.sh up  # misma versión que un cluster concreto
+LAB_RKE2_VERSION=v1.33.13+rke2r1 lab/lab.sh up  # otra versión (por defecto v1.33.13+rke2r2)
+LAB_RKE2_VERSION= LAB_RKE2_CHANNEL=v1.34 lab/lab.sh up   # última de un canal
 LAB_UEFI=true lab/lab.sh up                     # arranque UEFI, como bare metal UEFI
 ```
 

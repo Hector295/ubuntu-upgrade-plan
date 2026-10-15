@@ -17,7 +17,7 @@
 # Configuración (variables de entorno):
 #   LAB_CP=3 LAB_WORKERS=1 LAB_CPUS=2 LAB_MEM_MB=4096 LAB_DISK_GB=30
 #   LAB_UEFI=false (true: las VMs arrancan con UEFI, para probar GRUB como en bare metal UEFI)
-#   LAB_RKE2_CHANNEL=v1.33 (o LAB_RKE2_VERSION=v1.33.x+rke2rN)
+#   LAB_RKE2_VERSION=v1.33.13+rke2r2 (vacío: usar el canal LAB_RKE2_CHANNEL, p. ej. v1.33)
 #   LAB_POOL=default LAB_NET=default LIBVIRT_DEFAULT_URI=qemu:///system
 #   LAB_DIR=<repo>/.lab LAB_PREFIX=osu-lab
 set -eu
@@ -34,7 +34,8 @@ LAB_UEFI="${LAB_UEFI:-false}"
 LAB_POOL="${LAB_POOL:-default}"
 LAB_NET="${LAB_NET:-default}"
 LAB_RKE2_CHANNEL="${LAB_RKE2_CHANNEL:-v1.33}"
-LAB_RKE2_VERSION="${LAB_RKE2_VERSION:-}"
+# Versión fija por defecto: un canal puede apuntar a una release aún sin artefactos.
+LAB_RKE2_VERSION="${LAB_RKE2_VERSION-v1.33.13+rke2r2}"
 LAB_OVERLAY="${LAB_OVERLAY:-$REPO_DIR/manifests/overlays/lab-vm}"
 export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 
@@ -49,6 +50,9 @@ SUC_NS=system-upgrade
 KEY="$LAB_DIR/id_ed25519"
 KUBECONFIG_FILE="$LAB_DIR/kubeconfig"
 TOOLS_BIN="$REPO_DIR/tools/bin"
+# kubectl fijado de tools/ (make tools): versión controlada y sin las rarezas del de snap.
+KUBECTL="${KUBECTL:-$TOOLS_BIN/kubectl}"
+export KUBECTL
 
 info() { echo "$(date '+%H:%M:%S') $*"; }
 die() { echo "$(date '+%H:%M:%S') ERROR: $*" >&2; exit 1; }
@@ -206,13 +210,21 @@ install_rke2() {
   ssh_vm "$name" "curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_TYPE=$kind $install_env sh - >/dev/null && sudo systemctl enable --now rke2-$kind"
 }
 
-kc() { KUBECONFIG="$KUBECONFIG_FILE" kubectl "$@"; }
+# Comprueba que la release de RKE2 tiene artefactos publicados antes de instalar.
+check_rke2_release() {
+  [ -n "$LAB_RKE2_VERSION" ] || return 0
+  v=$(echo "$LAB_RKE2_VERSION" | sed 's/+/%2B/')
+  curl -fsSL -o /dev/null "https://github.com/rancher/rke2/releases/download/$v/sha256sum-amd64.txt" \
+    || die "la release de RKE2 $LAB_RKE2_VERSION no tiene artefactos publicados; usar otra con LAB_RKE2_VERSION"
+}
+
+kc() { KUBECONFIG="$KUBECONFIG_FILE" "$KUBECTL" "$@"; }
 
 wait_node_ready() {
   i=0
   until kc get node "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null | grep -qx True; do
     i=$((i + 1))
-    [ $i -lt 120 ] || die "$1 no llega a Ready"
+    [ $i -lt 240 ] || die "$1 no llega a Ready en 20 min"
     sleep 5
   done
   info "$1 Ready"
@@ -244,13 +256,14 @@ cmd_plan() {
 }
 
 cmd_up() {
-  for c in virsh virt-install genisoimage curl ssh ssh-keygen kubectl sha256sum; do
-    command -v "$c" >/dev/null 2>&1 || die "falta $c"
+  for c in virsh virt-install genisoimage curl ssh ssh-keygen sha256sum "$KUBECTL"; do
+    command -v "$c" >/dev/null 2>&1 || die "falta $c (las herramientas de tools/ se instalan con 'make tools')"
   done
   virsh pool-info "$LAB_POOL" >/dev/null 2>&1 || die "no existe el pool de libvirt '$LAB_POOL'"
   virsh net-info "$LAB_NET" >/dev/null 2>&1 || die "no existe la red de libvirt '$LAB_NET'"
   mkdir -p "$LAB_DIR"
   [ -f "$KEY" ] || ssh-keygen -q -t ed25519 -N "" -C "$LAB_PREFIX" -f "$KEY"
+  check_rke2_release
   [ -f "$LAB_DIR/token" ] || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$LAB_DIR/token"
   cmd_plan
   ensure_base_image
@@ -294,6 +307,8 @@ cmd_up() {
 cmd_env() {
   echo "export KUBECONFIG='$KUBECONFIG_FILE'"
   echo "export NS=$SUC_NS"
+  echo "export KUBECTL='$KUBECTL'"
+  echo "alias kubectl='$KUBECTL'"
 }
 
 cmd_status() {
@@ -322,7 +337,7 @@ cmd_e2e() {
   info "Render y validación de $LAB_OVERLAY"
   "$TOOLS_BIN/kustomize" build --load-restrictor LoadRestrictionsNone "$LAB_OVERLAY" > "$out"
   sh "$REPO_DIR/scripts/validate-manifests.sh" "$out" "$LAB_DIR/schema"
-  kubectl apply -f "$out" >/dev/null
+  "$KUBECTL" apply -f "$out" >/dev/null
   kernel=$("$TOOLS_BIN/yq" 'select(.kind == "ConfigMap") | .data.KERNEL_VERSION' "$out")
 
   sh "$REPO_DIR/scripts/preflight.sh"
@@ -334,7 +349,7 @@ cmd_e2e() {
   done
 
   info "Comprobación final"
-  bad=$(kubectl get nodes -o json | "$TOOLS_BIN/yq" -p json ".items[] | select((.status.nodeInfo.osImage | test(\"Ubuntu 24.04\") | not) or .status.nodeInfo.kernelVersion != \"$kernel\") | .metadata.name")
+  bad=$("$KUBECTL" get nodes -o json | "$TOOLS_BIN/yq" -p json ".items[] | select((.status.nodeInfo.osImage | test(\"Ubuntu 24.04\") | not) or .status.nodeInfo.kernelVersion != \"$kernel\") | .metadata.name")
   sh "$REPO_DIR/scripts/check-cluster.sh" >/dev/null || die "check-cluster.sh reporta problemas"
   [ -z "$bad" ] || die "nodos sin actualizar: $bad"
   sh "$REPO_DIR/scripts/rollout.sh" status

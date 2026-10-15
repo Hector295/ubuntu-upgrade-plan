@@ -15,6 +15,7 @@ bats|1.11.1|$GH/bats-core/bats-core/archive/refs/tags/v1.11.1.tar.gz|5c57ed9616b
 kubeconform|0.6.7|$GH/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz|95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
 kustomize|5.4.3|$GH/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz|3669470b454d865c8184d6bce78df05e977c9aea31c30df3c669317d43bcc7a7
 yq|4.44.3|$GH/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64|a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7
+kubectl|1.33.5|https://dl.k8s.io/release/v1.33.5/bin/linux/amd64/kubectl|6a12d6c39e4a611a3687ee24d8c733961bb4bae1ae975f5204400c0a6930c6fc
 "
 
 [ "$(uname -s)-$(uname -m)" = "Linux-x86_64" ] || { echo "Solo soportado en Linux x86_64" >&2; exit 1; }
@@ -43,8 +44,8 @@ install_tool() {
     kubeconform|kustomize)
       tar -xzf "$work/download" -C "$work"
       install -m 0755 "$work/$name" "$BIN_DIR/$name" ;;
-    yq)
-      install -m 0755 "$work/download" "$BIN_DIR/yq" ;;
+    yq|kubectl)
+      install -m 0755 "$work/download" "$BIN_DIR/$name" ;;
   esac
 
   rm -f "$BIN_DIR/.$name-"*
