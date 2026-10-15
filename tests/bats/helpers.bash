@@ -17,7 +17,7 @@ setup_node() {
     "$ROOT"/var/cache/apt/archives "$ROOT"/usr/local/sbin "$STUB_STATE"
   export PATH="$REPO/tests/stubs:$PATH"
   export KERNEL_VERSION="$TARGET_KERNEL"
-  unset HTTP_PROXY HTTPS_PROXY NO_PROXY APT_MIRROR SINGLE_REBOOT REQUIRE_PREDOWNLOAD MAX_REBOOTS
+  unset HTTP_PROXY HTTPS_PROXY NO_PROXY APT_MIRROR SINGLE_REBOOT REQUIRE_PREDOWNLOAD MAX_REBOOTS TARGET_VERSION
 
   set_os 22.04
   set_running "$OLD_KERNEL"
@@ -44,13 +44,21 @@ not_called() { ! grep -q -- "$1" "$STUB_STATE/calls.log" 2>/dev/null; }
 reboot_count() { [ -f "$STUB_STATE/reboots.log" ] && wc -l < "$STUB_STATE/reboots.log" || echo 0; }
 
 # Simula una pre-descarga completa (como la deja el subcomando predownload).
+# Prefijos de los paquetes del kernel según el destino (como la tabla TRANSITIONS).
+kernel_prefixes() {
+  case "${TARGET_VERSION:-24.04}" in
+    26.04) echo linux-image linux-modules linux-main-modules-zfs ;;
+    *) echo linux-image linux-modules linux-modules-extra ;;
+  esac
+}
+
 fake_predownload() {
   local d="$ROOT/var/lib/os-upgrade/archives"
   mkdir -p "$d"
-  for p in linux-image linux-modules linux-modules-extra; do
+  for p in $(kernel_prefixes); do
     : > "$d/${p}-${KERNEL_VERSION}_1.0_amd64.deb"
   done
-  printf 'KERNEL_VERSION=%s\nTARGET_VERSION=24.04\n' "$KERNEL_VERSION" > "$ROOT/var/lib/os-upgrade/predownload.ok"
+  printf 'KERNEL_VERSION=%s\nTARGET_VERSION=%s\n' "$KERNEL_VERSION" "${TARGET_VERSION:-24.04}" > "$ROOT/var/lib/os-upgrade/predownload.ok"
 }
 
 # Simula el reboot: arranca el kernel por defecto de GRUB (o el indicado).

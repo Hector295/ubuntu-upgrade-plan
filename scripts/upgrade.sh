@@ -1,12 +1,13 @@
 #!/bin/sh
-# os-upgrade: actualización in place de Ubuntu 22.04 -> 24.04 con un kernel fijado
+# os-upgrade: actualización in place de Ubuntu a la siguiente LTS (22.04 -> 24.04 o
+# 24.04 -> 26.04, según TARGET_VERSION) con un kernel fijado
 # (KERNEL_VERSION) en nodos RKE2. Lo ejecuta system-upgrade-controller (SUC) dentro de
 # "chroot /host", así que todas las rutas son del host.
 #
 # Subcomandos:
 #   prepare       initContainer del Plan de upgrade. Corre ANTES del drain: si algo
 #                 impide el upgrade, falla sin cordonear ni drenar el nodo.
-#   predownload   Plan sin drain ni reboot: descarga a disco local los paquetes de 24.04
+#   predownload   Plan sin drain ni reboot: descarga a disco local los paquetes de la versión destino
 #                 y del kernel, para que la ventana de upgrade no dependa de la red.
 #   upgrade       contenedor principal. Máquina de estados idempotente: cada reboot mata
 #                 el pod, el Job crea otro y el script continúa donde quedó.
@@ -43,13 +44,23 @@ POST_UPGRADE_HOOK_SLEEP="${POST_UPGRADE_HOOK_SLEEP:-20}"
 RKE2_WAIT_SECONDS="${RKE2_WAIT_SECONDS:-600}"
 RKE2_WAIT_INTERVAL="${RKE2_WAIT_INTERVAL:-10}"
 
-# Transición soportada. Parametrizable para el futuro, pero solo 22.04 -> 24.04 está probada.
-SOURCE_VERSION="${SOURCE_VERSION:-22.04}"
 TARGET_VERSION="${TARGET_VERSION:-24.04}"
-TARGET_CODENAME="${TARGET_CODENAME:-noble}"
+
+# Transiciones soportadas: origen|destino|codename del destino|paquetes del kernel fijado
+# (%s = KERNEL_VERSION). do-release-upgrade solo salta a la siguiente LTS.
+#   24.04: linux-modules-extra lleva los módulos que no están en linux-modules.
+#   26.04: linux-modules-extra ya no existe (todo está en linux-modules); los módulos de ZFS
+#          van aparte y los instala el metapaquete por defecto.
+TRANSITIONS="
+22.04|24.04|noble|linux-image-%s linux-modules-%s linux-modules-extra-%s
+24.04|26.04|resolute|linux-image-%s linux-modules-%s linux-main-modules-zfs-%s
+"
+SOURCE_VERSION=""
+TARGET_CODENAME=""
+KERNEL_PACKAGES_TEMPLATE=""
 
 # Claves que se guardan en disco para que host-phase (fuera del pod) use la misma configuración.
-CONFIG_KEYS="KERNEL_VERSION SINGLE_REBOOT REQUIRE_PREDOWNLOAD APT_MIRROR HTTP_PROXY HTTPS_PROXY NO_PROXY MIN_FREE_ROOT_MB MIN_FREE_BOOT_MB MAX_REBOOTS ALLOW_THIRD_PARTY POST_UPGRADE_HOOK_RETRIES SOURCE_VERSION TARGET_VERSION TARGET_CODENAME"
+CONFIG_KEYS="KERNEL_VERSION TARGET_VERSION SINGLE_REBOOT REQUIRE_PREDOWNLOAD APT_MIRROR HTTP_PROXY HTTPS_PROXY NO_PROXY MIN_FREE_ROOT_MB MIN_FREE_BOOT_MB MAX_REBOOTS ALLOW_THIRD_PARTY POST_UPGRADE_HOOK_RETRIES"
 
 # ------------------------------------------------------------------ rutas del host
 STATE_DIR="$ROOT/var/lib/os-upgrade"
@@ -159,7 +170,28 @@ installed_matching() {
 }
 
 kernel_packages() {
-  echo "linux-image-$KERNEL_VERSION linux-modules-$KERNEL_VERSION linux-modules-extra-$KERNEL_VERSION"
+  echo "$KERNEL_PACKAGES_TEMPLATE" | sed "s/%s/$KERNEL_VERSION/g"
+}
+
+# Deduce origen, codename y paquetes del kernel a partir de TARGET_VERSION.
+resolve_transition() {
+  line=$(echo "$TRANSITIONS" | awk -F'|' -v t="$TARGET_VERSION" '$2 == t')
+  [ -n "$line" ] || die "TARGET_VERSION no soportado: '$TARGET_VERSION' (soportados: $(echo "$TRANSITIONS" | awk -F'|' 'NF {printf "%s ", $2}'))"
+  SOURCE_VERSION=$(echo "$line" | cut -d'|' -f1)
+  TARGET_CODENAME=$(echo "$line" | cut -d'|' -f3)
+  KERNEL_PACKAGES_TEMPLATE=$(echo "$line" | cut -d'|' -f4)
+}
+
+# La versión del nodo admite el proceso: la de origen o la destino (solo cambio de kernel).
+check_version_supported() {
+  v=$1
+  case "$v" in
+    "$SOURCE_VERSION"|"$TARGET_VERSION") return 0 ;;
+  esac
+  if echo "$TRANSITIONS" | awk -F'|' -v v="$v" '$1 == v {f = 1} END {exit !f}'; then
+    die "el nodo está en $v y el destino es $TARGET_VERSION: do-release-upgrade solo salta a la siguiente LTS; actualizar antes a $SOURCE_VERSION (TARGET_VERSION=$SOURCE_VERSION)"
+  fi
+  die "versión no soportada: $v (se espera $SOURCE_VERSION o $TARGET_VERSION)"
 }
 
 kernel_installed() {
@@ -192,6 +224,7 @@ validate_config() {
     eval "val=\$$v"
     case "$val" in ''|*[!0-9]*) die "$v debe ser un número entero (valor: '$val')" ;; esac
   done
+  resolve_transition
 }
 
 write_config() {
@@ -209,6 +242,7 @@ load_config() {
   [ -f "$CONFIG_FILE" ] || fail_hard "no existe $CONFIG_FILE"
   # shellcheck disable=SC1090
   . "$CONFIG_FILE"
+  resolve_transition
 }
 
 # ------------------------------------------------------------------ estado
@@ -485,8 +519,9 @@ purge_other_kernels() {
   keep_running=$1
   running=$(running_kernel)
   to_purge=""
-  for p in $(installed_matching 'linux-image-[0-9]*' 'linux-modules-[0-9]*' 'linux-modules-extra-[0-9]*'); do
+  for p in $(installed_matching 'linux-image-[0-9]*' 'linux-modules-[0-9]*' 'linux-modules-extra-[0-9]*' 'linux-main-modules-zfs-[0-9]*'); do
     v=${p#linux-image-}
+    v=${v#linux-main-modules-zfs-}
     v=${v#linux-modules-extra-}
     v=${v#linux-modules-}
     [ "$v" = "$KERNEL_VERSION" ] && continue
@@ -671,10 +706,7 @@ cmd_prepare() {
   fi
 
   version=$(os_version)
-  case "$version" in
-    "$SOURCE_VERSION"|"$TARGET_VERSION") ;;
-    *) die "versión no soportada: $version (se espera $SOURCE_VERSION o $TARGET_VERSION)" ;;
-  esac
+  check_version_supported "$version"
   check_space
   check_hook_syntax
   check_sources
@@ -714,10 +746,7 @@ cmd_predownload() {
     return 0
   fi
   version=$(os_version)
-  case "$version" in
-    "$SOURCE_VERSION"|"$TARGET_VERSION") ;;
-    *) die "versión no soportada: $version" ;;
-  esac
+  check_version_supported "$version"
   check_space
   check_sources
   check_held
@@ -804,7 +833,7 @@ cmd_upgrade() {
       ;;
     "$TARGET_VERSION")
       # Ya en la versión destino pero sin el kernel fijado arrancado: nodo que ya estaba
-      # en 24.04 (solo cambio de kernel) o GRUB arrancó otro kernel.
+      # en ella (solo cambio de kernel) o GRUB arrancó otro kernel.
       step "1/7" "preparar el host"
       configure_host
       recover_dpkg
