@@ -27,6 +27,12 @@ config_value() {
   k -n "$NS" get configmap "$cm" -o json | jq_ ".data.$1 // \"\""
 }
 
+# Versión destino de la campaña (TARGET_VERSION del ConfigMap; 24.04 si no está definida).
+target_version() {
+  v=$(config_value TARGET_VERSION 2>/dev/null || true)
+  echo "${v:-24.04}"
+}
+
 plan_image() { plan_json "$PLAN_WORKERS" | jq_ '.spec.upgrade.image // ""'; }
 
 # ------------------------------------------------------------------ nodos

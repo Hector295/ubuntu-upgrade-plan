@@ -14,7 +14,7 @@
 #   antes de cada  API, SUC, Plans, nodos Ready, etcd sano, nada más en upgrade
 #   durante        prepare y drain con timeout: si fallan, el nodo se aparta (os-upgrade=hold)
 #                  sin haberse tocado; si falla el upgrade, se para y se deja como está
-#   después        24.04 + kernel, Ready, DaemonSets, pods del nodo, DNS, etcd -> os-upgrade=done
+#   después        versión destino + kernel, Ready, DaemonSets, pods, DNS, etcd -> os-upgrade=done
 #   --dry-run      muestra el plan y hace las comprobaciones, sin cambiar nada
 #   --yes          sin preguntas (al vencer el drain, aborta el nodo)
 set -eu
@@ -263,7 +263,7 @@ verify_node() {
   info "Verificando $node"
   while :; do
     if out=$(
-      check_node_upgraded "$node" "$kernel" "$plan" "$hash" \
+      check_node_upgraded "$node" "$kernel" "$plan" "$hash" "$TARGET" \
         && check_node_pods "$node" \
         && check_daemonsets \
         && { [ "$plan" != "$PLAN_CP" ] || check_etcd; }
@@ -296,7 +296,7 @@ move_leader_off() {
     n=$(node_for_endpoint "$ep")
     [ "$n" != "$node" ] || continue
     case "$(node_json "$n" | jq_ '.status.nodeInfo.osImage')" in
-      *"Ubuntu 24.04"*) target_id=$id; target_node=$n; break ;;
+      *"Ubuntu $TARGET"*) target_id=$id; target_node=$n; break ;;
     esac
     if [ -z "$target_id" ]; then target_id=$id; target_node=$n; fi
   done
@@ -407,7 +407,8 @@ cmd_upgrade() {
   total=$#
 
   kernel=$(config_value KERNEL_VERSION || true)
-  echo "Rollout en el contexto '$(k config current-context 2>/dev/null)', kernel objetivo ${kernel:-?}:"
+  TARGET=$(target_version)
+  echo "Rollout en el contexto '$(k config current-context 2>/dev/null)', Ubuntu $TARGET con kernel ${kernel:-?}:"
   i=1
   for n in "$@"; do
     note=""
@@ -502,11 +503,12 @@ cmd_predownload() {
 }
 
 # Estado real de cada nodo:
-#   UPGRADE      ok (24.04 con el KERNEL_VERSION actual) | en curso (os-upgrade=upgrade) | no
+#   UPGRADE      ok (versión destino con el KERNEL_VERSION actual) | en curso (os-upgrade=upgrade) | no
 #   PREDESCARGA  ok (versión actual del Plan) | anterior (otra versión) | no | - (ya actualizado)
 cmd_status() {
   hp=$(plan_hash "$PLAN_PREDOWNLOAD" 2>/dev/null || true)
   kernel=$(config_value KERNEL_VERSION 2>/dev/null || true)
+  TARGET=$(target_version)
   wanted=" $(selected_nodes | tr '\n' ' ') "
   printf '%-28s %-6s %-6s %-12s %-11s %-8s %-20s %-24s %s\n' NODO ROL GRUPO OS-UPGRADE PREDESCARGA UPGRADE SO KERNEL ESTADO
   nodes_json | jq_ "
@@ -526,7 +528,7 @@ cmd_status() {
       [ "$ready" = True ] && ready=Ready || ready=NotReady
       cordon=""; [ "$unsched" != true ] || cordon=cordon
       case "$os" in
-        *24.04*) [ -n "$kernel" ] && [ "$kv" = "$kernel" ] && ud="ok" || ud="no" ;;
+        *"$TARGET"*) [ -n "$kernel" ] && [ "$kv" = "$kernel" ] && ud="ok" || ud="no" ;;
         *) ud="no" ;;
       esac
       [ "$ud" = ok ] || [ "$state" != upgrade ] || ud="en curso"

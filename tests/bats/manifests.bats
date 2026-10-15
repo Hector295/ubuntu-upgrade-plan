@@ -176,3 +176,31 @@ YAML
   [[ "$output" == *"ALLOW_THIRD_PARTY debe ser true o false"* ]]
   [[ "$output" == *"POST_UPGRADE_HOOK_RETRIES debe ser un número entero"* ]]
 }
+
+@test "validación: TARGET_VERSION no soportado se rechaza" {
+  edit '(select(.kind == "ConfigMap") | .data.TARGET_VERSION) = "25.10"'
+  edit '(select(.kind == "Plan") | .spec.version) = "25.10"'
+  run sh "$VALIDATE" "$M" "$SCHEMA"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"TARGET_VERSION '25.10' no soportado (soportados: 24.04 26.04 )"* ]]
+}
+
+@test "validación: spec.version de los Plans debe coincidir con TARGET_VERSION" {
+  edit '(select(.kind == "ConfigMap") | .data.TARGET_VERSION) = "26.04"'
+  run sh "$VALIDATE" "$M" "$SCHEMA"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"os-upgrade-cp: spec.version no coincide con TARGET_VERSION (26.04)"*"components/target-version"* ]]
+}
+
+@test "render: un overlay con TARGET_VERSION=26.04 pone 26.04 en los Plans y valida" {
+  OVL="$REPO/manifests/overlays/.bats-2604-$$"
+  mkdir -p "$OVL"
+  printf 'TARGET_VERSION=26.04\nKERNEL_VERSION=7.0.0-38-generic\n' > "$OVL/config.env"
+  cp "$REPO/manifests/overlays/lab/kustomization.yaml" "$OVL/"
+  "$REPO/tools/bin/kustomize" build --load-restrictor LoadRestrictionsNone "$OVL" > "$M"
+  rm -rf "$OVL"
+  [ "$("$YQ" ea '[select(.kind == "Plan") | .spec.version] | unique | .[]' "$M")" = "26.04" ]
+  run sh "$VALIDATE" "$M" "$SCHEMA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Ubuntu 26.04, kernel 7.0.0-38-generic"* ]]
+}

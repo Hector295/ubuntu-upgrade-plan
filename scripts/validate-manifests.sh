@@ -96,6 +96,18 @@ if [ -z "$kernel" ]; then
 elif ! echo "$kernel" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+-generic$'; then
   error "KERNEL_VERSION inválido: '$kernel' (formato esperado: 6.8.0-139-generic)"
 fi
+# Destinos soportados: los de la tabla TRANSITIONS de upgrade.sh (una sola fuente).
+supported=$(awk -F'|' '/^TRANSITIONS="/ {f = 1; next} f && /^"/ {f = 0} f && NF {print $2}' \
+  "$(dirname "$0")/upgrade.sh" | tr '\n' ' ')
+target=$(cfg TARGET_VERSION)
+case " $supported " in
+  *" $target "*) ;;
+  *) error "TARGET_VERSION '$target' no soportado (soportados: $supported)" ;;
+esac
+for name in $(plans ".[] | select(.spec.version != \"$target\") | .metadata.name"); do
+  error "$name: spec.version no coincide con TARGET_VERSION ($target); ¿el overlay incluye components/target-version?"
+done
+
 for key in SINGLE_REBOOT REQUIRE_PREDOWNLOAD ALLOW_THIRD_PARTY; do
   case "$(cfg "$key")" in true|false) ;; *) error "$key debe ser true o false" ;; esac
 done
@@ -121,4 +133,4 @@ if [ "$errors" -gt 0 ]; then
   echo "Validación fallida: $errors error(es) en $MANIFESTS"
   exit 1
 fi
-echo "Validación OK: $MANIFESTS (kernel $kernel)"
+echo "Validación OK: $MANIFESTS (Ubuntu $target, kernel $kernel)"

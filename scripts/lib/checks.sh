@@ -207,6 +207,7 @@ check_node_upgraded() {
   kernel=$2
   plan=$3
   hash=$4
+  target=$5
   j=$(node_json "$node")
   os=$(echo "$j" | jq_ '.status.nodeInfo.osImage')
   kv=$(echo "$j" | jq_ '.status.nodeInfo.kernelVersion')
@@ -214,7 +215,7 @@ check_node_upgraded() {
   unsched=$(echo "$j" | jq_ '.spec.unschedulable // false')
   label=$(echo "$j" | jq_ ".metadata.labels[\"plan.upgrade.cattle.io/$plan\"] // \"\"")
   problems=""
-  case "$os" in *"Ubuntu 24.04"*) ;; *) problems="$problems; sistema '$os'" ;; esac
+  case "$os" in *"Ubuntu $target"*) ;; *) problems="$problems; sistema '$os' (esperado Ubuntu $target)" ;; esac
   [ "$kv" = "$kernel" ] || problems="$problems; kernel '$kv' (esperado $kernel)"
   [ "$ready" = "True" ] || problems="$problems; no Ready"
   [ "$unsched" != "true" ] || problems="$problems; sigue cordoneado"

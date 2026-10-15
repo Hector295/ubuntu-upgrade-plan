@@ -126,8 +126,13 @@ frame() {
 
 # Expresión yq que deja el nodo como actualizado por el Plan.
 upgraded_expr() {
-  local plan=$1 hash=$2 kernel=${3:-$TARGET_KERNEL}
-  echo ".metadata.labels[\"plan.upgrade.cattle.io/$plan\"] = \"$hash\" | .status.nodeInfo.osImage = \"Ubuntu 24.04.3 LTS\" | .status.nodeInfo.kernelVersion = \"$kernel\" | .spec.unschedulable = false"
+  local plan=$1 hash=$2 kernel=${3:-$TARGET_KERNEL} os=${4:-Ubuntu 24.04.3 LTS}
+  echo ".metadata.labels[\"plan.upgrade.cattle.io/$plan\"] = \"$hash\" | .status.nodeInfo.osImage = \"$os\" | .status.nodeInfo.kernelVersion = \"$kernel\" | .spec.unschedulable = false"
+}
+
+# Campaña 24.04 -> 26.04 en el ConfigMap de los Plans.
+set_target_2604() {
+  y -i -p json -o json '.items[0].data.TARGET_VERSION = "26.04" | .items[0].data.KERNEL_VERSION = "7.0.0-38-generic"' "$K8S/configmaps.json"
 }
 
 # Upgrade completo y correcto de un nodo.

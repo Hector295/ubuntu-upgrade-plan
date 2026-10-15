@@ -287,3 +287,29 @@ EOF2
   run sh "$ROLLOUT" status --nodes w1
   echo "$output" | grep -Eq '^w1 +worker +1 +- +no +no +Ubuntu_24.04.3 +6.8.0-147-generic'
 }
+
+@test "rollout 26.04: verifica contra Ubuntu 26.04 y el kernel 7.0" {
+  set_target_2604
+  frame os-upgrade-workers w1 1 ok ok ok complete "$(upgraded_expr os-upgrade-workers "$H_W" 7.0.0-38-generic 'Ubuntu 26.04.1 LTS')"
+  run sh "$ROLLOUT" upgrade --nodes w1 --yes
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Ubuntu 26.04 con kernel 7.0.0-38-generic"* ]]
+  [[ "$output" == *"[OK]    w1: Ubuntu 26.04.1 LTS, kernel 7.0.0-38-generic"* ]]
+}
+
+@test "rollout 26.04: un nodo que se queda en 24.04 no pasa la verificación" {
+  set_target_2604
+  frame os-upgrade-workers w1 1 ok ok ok complete "$(upgraded_expr os-upgrade-workers "$H_W" 7.0.0-38-generic)"
+  SETTLE_TIMEOUT=0s run sh "$ROLLOUT" upgrade --nodes w1 --yes
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"sistema 'Ubuntu 24.04.3 LTS' (esperado Ubuntu 26.04)"* ]]
+}
+
+@test "status 26.04: un nodo en 24.04 con el kernel 6.8 ya no figura como actualizado" {
+  set_target_2604
+  y -i -p json -o json "(.items[] | select(.metadata.name == \"w1\")) |= ($(upgraded_expr os-upgrade-workers "$H_W"))" "$K8S/nodes.json"
+  y -i -p json -o json "(.items[] | select(.metadata.name == \"w2\")) |= ($(upgraded_expr os-upgrade-workers "$H_W" 7.0.0-38-generic 'Ubuntu 26.04.1 LTS'))" "$K8S/nodes.json"
+  run sh "$ROLLOUT" status --group 1
+  echo "$output" | grep -Eq '^w1 +worker +1 +- +no +no +Ubuntu_24.04.3'
+  echo "$output" | grep -Eq '^w2 +worker +1 +- +- +ok +Ubuntu_26.04.1'
+}

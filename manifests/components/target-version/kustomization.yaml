@@ -1,0 +1,15 @@
+# spec.version de los Plans = TARGET_VERSION del ConfigMap del overlay. Es un component para
+# que se aplique después de que el overlay mezcle su config.env.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+replacements:
+  - source:
+      kind: ConfigMap
+      name: os-upgrade-config
+      fieldPath: data.TARGET_VERSION
+    targets:
+      - select:
+          kind: Plan
+        fieldPaths:
+          - spec.version

@@ -6,6 +6,9 @@ kind: Kustomization
 resources:
   - ../../base
 
+components:
+  - ../../components/target-version
+
 namespace: system-upgrade
 
 configMapGenerator:

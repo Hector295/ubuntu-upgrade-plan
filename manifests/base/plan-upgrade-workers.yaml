@@ -5,7 +5,7 @@ kind: Plan
 metadata:
   name: os-upgrade-workers
 spec:
-  version: "24.04"
+  version: "24.04"                 # lo sustituye TARGET_VERSION (components/target-version)
   concurrency: 1
   exclusive: true                  # ver nota en plan-predownload.yaml
   jobActiveDeadlineSecs: 7200      # por nodo, drain y reboot incluidos
