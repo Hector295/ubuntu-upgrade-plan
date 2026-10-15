@@ -19,6 +19,7 @@ Solo hace falta escribir los que cambian respecto al valor por defecto
 
 | Parámetro | Por defecto | Descripción |
 |---|---|---|
+| `TARGET_VERSION` | `24.04` | Versión destino: `24.04` (desde 22.04) o `26.04` (desde 24.04). Ver [Transiciones soportadas](#transiciones-soportadas) |
 | `KERNEL_VERSION` | *(obligatorio)* | Kernel exacto, formato `X.Y.Z-N-generic` (p. ej. `6.8.0-139-generic`). Se instalan `linux-image`, `linux-modules` y `linux-modules-extra` de esa versión. Ver [kernel.md](kernel.md) |
 | `SINGLE_REBOOT` | `true` | Si el nodo necesitaría un reboot previo al release upgrade (libc6, linux-base o un kernel de 22.04 pendientes), el preflight falla **antes del drain**. Con `false` solo avisa y el nodo reinicia dos veces |
 | `REQUIRE_PREDOWNLOAD` | `true` | El preflight exige que la pre-descarga se haya hecho para este `KERNEL_VERSION`. Con `false` solo avisa y todo se descarga en la ventana |
@@ -34,6 +35,27 @@ Solo hace falta escribir los que cambian respecto al valor por defecto
 
 El proxy se exporta a apt, a `do-release-upgrade` y a la unidad systemd del host. Si los nodos
 ya tienen el proxy configurado en apt (`Acquire::http::Proxy`), no hace falta repetirlo aquí.
+
+## Transiciones soportadas
+
+`do-release-upgrade` solo salta a la **siguiente LTS**, así que cada campaña es un salto:
+
+| `TARGET_VERSION` | Origen | Codename | Paquetes del kernel fijado | Ejemplo de `KERNEL_VERSION` |
+|---|---|---|---|---|
+| `24.04` (por defecto) | 22.04 | noble | `linux-image`, `linux-modules`, `linux-modules-extra` | `6.8.0-139-generic` |
+| `26.04` | 24.04 | resolute | `linux-image`, `linux-modules`, `linux-main-modules-zfs` | `7.0.0-38-generic` |
+
+- **26.04 no tiene `linux-modules-extra`:** su contenido se integró en `linux-modules`. Los
+  módulos de ZFS van en un paquete aparte que el metapaquete instala por defecto, y la
+  herramienta también lo instala.
+- **Un nodo dos LTS por detrás** (22.04 con `TARGET_VERSION=26.04`) se rechaza en `prepare`,
+  antes del drain: primero una campaña a 24.04 y después otra a 26.04.
+- **Un nodo que ya está en la versión destino** solo cambia de kernel.
+- La tabla vive en `scripts/upgrade.sh` (`TRANSITIONS`); `make validate` rechaza un
+  `TARGET_VERSION` que no esté en ella.
+- `spec.version` de los Plans toma el valor de `TARGET_VERSION` mediante el component
+  `manifests/components/target-version`. Los overlays nuevos copiados de `lab` ya lo incluyen;
+  `make validate` avisa si falta.
 
 ## Fuentes de apt: mirror interno y repos de terceros
 
@@ -51,7 +73,7 @@ cada fuente: si publica `noble`, la reescribe a `noble`; si no, la desactiva.
 En cada nodo, `prepare` y la pre-descarga registran las fuentes no oficiales que encuentran
 (formatos `.list` y `.sources`) y cómo se tratarán. Al terminar, las fuentes que el upgrade
 haya desactivado salen como aviso y en el informe del nodo (`/var/log/os-upgrade-report.txt`).
-Reactivarlas es manual: hay que comprobar que el proveedor publica paquetes para 24.04.
+Reactivarlas es manual: hay que comprobar que el proveedor publica paquetes para la versión destino.
 
 `prepare` y la pre-descarga también avisan de los paquetes retenidos con `apt-mark hold`
 (aparte del kernel fijado), porque pueden impedir que `do-release-upgrade` calcule el upgrade.
@@ -59,7 +81,7 @@ Reactivarlas es manual: hay que comprobar que el proveedor publica paquetes para
 ## Hook post-upgrade
 
 Script propio que se ejecuta en cada nodo **al final** del proceso, como root en el host, con
-el sistema ya en 24.04, el kernel fijado arrancado y rke2 activo. Sirve para comprobaciones
+el sistema ya en la versión destino, el kernel fijado arrancado y rke2 activo. Sirve para comprobaciones
 del entorno que la herramienta no conoce: montajes, servicios propios, drivers de GPU, agentes
 de monitorización, etc.
 

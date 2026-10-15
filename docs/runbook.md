@@ -7,7 +7,10 @@ confirmación antes del siguiente. Los procedimientos manuales, nodo a nodo
 ([paso 6](#6-ventana-manual-por-grupos)), quedan como alternativa y como referencia de lo que
 hace el orquestador.
 
-Convenciones: `N` es el nombre del nodo, `G` el número de grupo y `NS=cattle-system`.
+Convenciones: `N` es el nombre del nodo, `G` el número de grupo y `NS=cattle-system`. Los
+ejemplos son de la campaña 22.04 → 24.04; para 24.04 → 26.04 (`TARGET_VERSION=26.04`) el
+procedimiento es el mismo cambiando las versiones
+([transiciones](configuracion.md#transiciones-soportadas)).
 
 ## Acceso al cluster (kubeconfig)
 
@@ -409,6 +412,7 @@ Si `/usr/local/sbin/os-upgrade.sh` aún no existe, el fallo fue antes de copiarl
 | `el mirror de Ubuntu del nodo (...) no es un mirror público` | Mirror interno con `ALLOW_THIRD_PARTY=false`: el upgrade lo cambiaría a `archive.ubuntu.com`. Usar `ALLOW_THIRD_PARTY=true` ([configuracion.md](configuracion.md#fuentes-de-apt-mirror-interno-y-repos-de-terceros)) |
 | `el hook post-upgrade tiene errores de sintaxis` | Corregir `post-upgrade-hook.sh` del overlay, `make validate` y `kubectl apply` |
 | `KERNEL_VERSION ...` | Configuración del overlay; corregir, `make validate` y `kubectl apply` |
+| `el nodo está en 22.04 y el destino es 26.04` | `do-release-upgrade` solo salta una LTS: pasar ese nodo antes por una campaña a 24.04 |
 
 Para reintentar tras arreglarlo: `kubectl -n $NS delete job <job>`. Para dejar el nodo para más
 tarde: `kubectl label node N os-upgrade-` y borrar el Job.

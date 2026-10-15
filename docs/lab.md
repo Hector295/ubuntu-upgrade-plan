@@ -1,6 +1,6 @@
 # Lab de VMs (pruebas de extremo a extremo)
 
-`lab/lab.sh` crea en tu equipo un cluster RKE2 con VMs Ubuntu 22.04 sobre libvirt e instala el
+`lab/lab.sh` crea en tu equipo un cluster RKE2 con VMs Ubuntu 22.04 (o 24.04) sobre libvirt e instala el
 **system-upgrade-controller oficial v0.16.3** (la misma versión que usa Rancher). Sirve para
 probar todo el flujo (`preflight.sh`, `rollout.sh`, los Plans y `upgrade.sh`) sin tocar ningún
 cluster real.
@@ -13,7 +13,7 @@ cluster real.
 - Recursos con la topología por defecto (3 control plane + 1 worker): **16 GB de RAM, 8 vCPU** y
   unos 10 GB de disco en el pool (discos en copia sobre una imagen base común).
 - Salida a internet desde las VMs: imagen de Ubuntu, RKE2, imagen `ubuntu:24.04` de los Jobs y
-  paquetes de 24.04.
+  paquetes de la versión destino.
 
 ## Uso
 
@@ -37,6 +37,15 @@ LAB_RKE2_VERSION= LAB_RKE2_CHANNEL=v1.34 lab/lab.sh up   # última de un canal
 LAB_UEFI=true lab/lab.sh up                     # arranque UEFI, como bare metal UEFI
 ```
 
+Para probar **24.04 → 26.04**, se crean las VMs en 24.04 y se usa el overlay `lab-vm-2604`
+(`TARGET_VERSION=26.04`, kernel `7.0.0-38-generic`):
+
+```sh
+lab/lab.sh down                                  # si había un lab de 22.04
+LAB_UBUNTU=24.04 lab/lab.sh up
+LAB_UBUNTU=24.04 LAB_OVERLAY=$PWD/manifests/overlays/lab-vm-2604 lab/lab.sh e2e
+```
+
 Con `LAB_CP` inferior a 3, `preflight.sh` y `rollout.sh` fallarán en la comprobación de etcd
 (mínimo 3 miembros); para esa topología: `export ETCD_MIN_MEMBERS=1`.
 
@@ -52,7 +61,7 @@ se tocan; hay tests que lo comprueban.
 3. `rollout.sh predownload --wait` del grupo 1 (worker) y del grupo 2 (control plane).
 4. `rollout.sh upgrade --yes` del grupo 1 y luego del grupo 2: incluye `move-leader` del líder de
    etcd, la supervisión de fases y la verificación tras cada nodo.
-5. Comprueba que **todos** los nodos quedan en Ubuntu 24.04 con el `KERNEL_VERSION` del overlay y
+5. Comprueba que **todos** los nodos quedan en el `TARGET_VERSION` con el `KERNEL_VERSION` del overlay y
    que `check-cluster.sh` está sano.
 
 Con 4 nodos tarda del orden de 1,5-2 h (cada nodo: drain, release upgrade y un reboot).

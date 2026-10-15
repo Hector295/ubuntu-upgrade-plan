@@ -1,4 +1,4 @@
-# os-upgrade: Ubuntu 22.04 → 24.04 con kernel fijado en nodos RKE2
+# os-upgrade: Ubuntu LTS a la siguiente LTS con kernel fijado en nodos RKE2
 
 Herramienta para actualizar in place el sistema operativo de los nodos de clusters RKE2
 gestionados por Rancher, usando el **system-upgrade-controller (SUC)** que Rancher ya despliega
@@ -6,7 +6,10 @@ en `cattle-system`. No modifica el SUC ni los Plans de Rancher.
 
 Qué hace en cada nodo:
 
-- Actualiza Ubuntu 22.04 → 24.04 con `do-release-upgrade`.
+- Actualiza Ubuntu a la siguiente LTS con `do-release-upgrade`: **22.04 → 24.04** o
+  **24.04 → 26.04**, según `TARGET_VERSION`
+  ([transiciones](docs/configuracion.md#transiciones-soportadas)). Los ejemplos de la
+  documentación usan 22.04 → 24.04.
 - Instala **exactamente** el kernel indicado en `KERNEL_VERSION` (p. ej. `6.8.0-139-generic`:
   `linux-image`, `linux-modules` y `linux-modules-extra`) y garantiza que se quede: sin
   metapaquetes, `apt-mark hold`, pin de apt y `GRUB_DEFAULT` fijo. Ver [docs/kernel.md](docs/kernel.md).
@@ -14,7 +17,7 @@ Qué hace en cada nodo:
 - Descarga previa de paquetes, sin drain, días antes de la ventana: la ventana no depende de la red.
 - Preflight antes del drain: si el nodo no puede actualizarse, falla sin cordonearlo.
 - Idempotente: cada reboot mata el pod, el Job crea otro y el proceso continúa donde quedó.
-- Mantiene el mirror interno y los repos de terceros que publican 24.04
+- Mantiene el mirror interno y los repos de terceros que publican la versión destino
   (`--allow-third-party`) y avisa de los que se desactivan.
 - Hook post-upgrade opcional por cluster para comprobaciones propias, e informe final en cada
   nodo (`/var/log/os-upgrade-report.txt`).
@@ -22,7 +25,8 @@ Qué hace en cada nodo:
 ## Requisitos
 
 - Clusters RKE2 con Rancher y su SUC en `cattle-system` (probado con `rancher/system-upgrade-controller:v0.16.3`).
-- Nodos Ubuntu 22.04 (o 24.04, para solo cambiar de kernel), con GRUB.
+- Nodos Ubuntu en la versión de origen de la transición (o ya en la destino, para solo cambiar
+  de kernel), con GRUB.
 - Acceso de los nodos a un mirror de Ubuntu (directo, por proxy o mirror interno).
 - En tu equipo: `make`, `curl` y `kubectl`. El resto de herramientas se descarga en versiones
   fijas con `make tools`.
@@ -66,7 +70,7 @@ sh scripts/rollout.sh status --group 1
 
 `rollout.sh` ordena workers → control plane no líderes → líder de etcd (con `move-leader`
 antes). Supervisa prepare y drain con timeout, y aparta el nodo sin tocarlo si fallan. Después
-de cada nodo verifica 24.04, kernel, DaemonSets, pods, DNS y etcd, y pide confirmación antes
+de cada nodo verifica versión destino, kernel, DaemonSets, pods, DNS y etcd, y pide confirmación antes
 del siguiente. Los grupos son un label `os-upgrade-group=<n>`.
 
 El procedimiento completo, incluida la alternativa manual, está en el

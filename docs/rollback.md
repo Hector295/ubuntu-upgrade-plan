@@ -1,6 +1,7 @@
 # Rollback
 
-Ubuntu **no permite volver de 24.04 a 22.04** en el mismo sistema. "Rollback" aquí significa
+Ubuntu **no permite volver a la LTS anterior** (de 24.04 a 22.04, o de 26.04 a 24.04) en el mismo
+sistema. Los ejemplos son de la campaña a 24.04. "Rollback" aquí significa
 devolver el nodo (y el cluster) a un estado sano por una de estas vías:
 
 | Vía | Cuándo | Impacto |

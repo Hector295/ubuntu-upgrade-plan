@@ -1,15 +1,16 @@
 # Kernel fijado (`KERNEL_VERSION`)
 
 La única opción de kernel es una versión exacta, p. ej. `KERNEL_VERSION=6.8.0-139-generic`.
-Se instalan siempre tres paquetes de esa versión:
+Se instalan siempre tres paquetes de esa versión, que dependen de la versión destino:
 
-- `linux-image-6.8.0-139-generic`
-- `linux-modules-6.8.0-139-generic`
-- `linux-modules-extra-6.8.0-139-generic`
+| Destino | Paquetes |
+|---|---|
+| 24.04 | `linux-image-<v>`, `linux-modules-<v>`, `linux-modules-extra-<v>` |
+| 26.04 | `linux-image-<v>`, `linux-modules-<v>` (incluye lo que antes iba en `-extra`), `linux-main-modules-zfs-<v>` |
 
 ## Elegir y verificar la versión
 
-La versión tiene que estar publicada en el archivo de Ubuntu 24.04 (o en vuestro mirror).
+La versión tiene que estar publicada en el archivo de la versión destino (o en vuestro mirror).
 Ubuntu va retirando del índice ABIs antiguas, así que conviene comprobarlo antes de cada campaña:
 
 ```sh
@@ -20,7 +21,9 @@ for pocket in noble-updates noble-security; do
 done
 ```
 
-Deben salir las tres líneas. En un nodo 24.04 también vale
+Deben salir las tres líneas. Para 26.04, cambiar `noble` por `resolute` y
+`linux-(image|modules|modules-extra)` por `linux-(image|modules|main-modules-zfs)` (los kernels
+de 26.04 son la serie 7.0, p. ej. `7\.0\.0-38-generic`). En un nodo ya en la versión destino también vale
 `apt-cache policy linux-image-6.8.0-139-generic`.
 
 Además, la **pre-descarga** lo comprueba en cada nodo: si el kernel no está disponible, el Job de
@@ -52,7 +55,7 @@ sh /usr/local/sbin/os-upgrade.sh status
 
 ## Cambiar de kernel más adelante
 
-El mismo proceso sirve para nodos que ya están en 24.04: no hace release upgrade, solo cambia
+El mismo proceso sirve para nodos que ya están en la versión destino: no hace release upgrade, solo cambia
 el kernel con un reboot.
 
 1. Cambiar `KERNEL_VERSION` en `config.env` del overlay y `make validate CLUSTER=<cluster>`.
@@ -68,9 +71,9 @@ Solo si se decide abandonar el kernel fijado. En el nodo:
 
 ```sh
 V=6.8.0-139-generic
-sudo apt-mark unhold linux-image-$V linux-modules-$V linux-modules-extra-$V
+sudo apt-mark unhold $(apt-mark showhold | grep -- "-$V\$")
 sudo rm /etc/apt/preferences.d/99-os-upgrade-kernel /etc/default/grub.d/99-os-upgrade-kernel.cfg
-sudo apt-get install linux-generic          # o linux-generic-hwe-24.04
+sudo apt-get install linux-generic          # o el HWE: linux-generic-hwe-<versión>
 sudo update-grub
 # reboot cuando corresponda (con drain)
 ```
