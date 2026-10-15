@@ -50,9 +50,23 @@ Los Plans solo actúan sobre nodos con el label `os-upgrade`:
 | `os-upgrade=done` | ninguno | Nodo terminado (lo pones tú al acabar) |
 | `os-upgrade=hold` | ninguno | Nodo apartado: se excluye al lanzar o reanudar un grupo |
 
-El procedimiento completo está en el **[runbook](docs/runbook.md)**: nodo a nodo, o **por
-grupos** con un label `os-upgrade-group=<n>` (canario → workers → control plane no líderes →
-líder), en cuyo caso el SUC procesa cada grupo de uno en uno y se para si un nodo falla.
+Los labels los pone el orquestador:
+
+```sh
+sh scripts/preflight.sh --group 1                      # comprobaciones, solo lectura
+sh scripts/rollout.sh predownload --group 1 --wait     # pre-descarga (sin impacto)
+sh scripts/rollout.sh upgrade --group 1 --dry-run      # plan y comprobaciones, sin cambiar nada
+sh scripts/rollout.sh upgrade --group 1                # nodo a nodo, verificando y confirmando
+sh scripts/rollout.sh status --group 1
+```
+
+`rollout.sh` ordena workers → control plane no líderes → líder de etcd (con `move-leader`
+antes). Supervisa prepare y drain con timeout, y aparta el nodo sin tocarlo si fallan. Después
+de cada nodo verifica 24.04, kernel, DaemonSets, pods, DNS y etcd, y pide confirmación antes
+del siguiente. Los grupos son un label `os-upgrade-group=<n>`.
+
+El procedimiento completo, incluida la alternativa manual, está en el
+**[runbook](docs/runbook.md)**.
 
 ## Documentación
 
@@ -64,12 +78,15 @@ líder), en cuyo caso el SUC procesa cada grupo de uno en uno y se para si un no
 
 ```
 scripts/upgrade.sh            se ejecuta en los nodos (subcomandos prepare, predownload, upgrade...)
+scripts/rollout.sh            orquestador: predownload, upgrade nodo a nodo, status
+scripts/preflight.sh          comprobaciones previas del cluster (solo lectura)
+scripts/check-cluster.sh      estado detallado de nodos, etcd, Jobs y pods, con veredicto
+scripts/lib/                  librerías del operador: kubectl, etcd y comprobaciones
 scripts/validate-manifests.sh valida los Plans contra el CRD real del cluster y reglas propias
-scripts/check-cluster.sh      estado de nodos, etcd y Jobs de SUC (se rehace en la iteración 2)
 manifests/base/               Plans, configuración por defecto y config de kustomize
 manifests/overlays/<cluster>/ lo único que se edita por cluster
 manifests/schemas/<cluster>/  CRD de Plans exportado de cada cluster
-tests/                        tests bats con stubs de apt, dpkg, systemctl, grub...
+tests/                        tests bats: stubs del nodo (apt, dpkg, systemctl, grub...) y de kubectl
 tools/                        install.sh descarga las herramientas fijadas (tools/bin no se versiona)
 ```
 
@@ -77,7 +94,7 @@ tools/                        install.sh descarga las herramientas fijadas (tool
 
 ```sh
 make lint       # shellcheck sin warnings (shell POSIX)
-make test       # bats: lógica de upgrade.sh sobre una raíz falsa + validación de manifiestos
+make test       # bats: upgrade.sh sobre una raíz falsa, rollout/preflight sobre un cluster falso y manifiestos
 make check      # lint + test + validate
 ```
 

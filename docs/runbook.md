@@ -1,8 +1,11 @@
 # Runbook: upgrade de un cluster
 
-Procedimiento manual: nodo a nodo ([paso 4](#4-ventana-un-nodo-cada-vez)) o por grupos
-([paso 5](#5-ventana-por-grupos)). En la iteración 2, `scripts/rollout.sh` automatizará
-labels, esperas, verificaciones y confirmación entre nodos.
+La ventana se hace con **`scripts/rollout.sh`** ([paso 4](#4-ventana-con-rolloutsh-recomendado)),
+que lanza los nodos de uno en uno, supervisa cada fase, verifica el resultado y pide
+confirmación antes del siguiente. Los procedimientos manuales, nodo a nodo
+([paso 5](#5-ventana-manual-un-nodo-cada-vez)) o por grupos
+([paso 6](#6-ventana-manual-por-grupos)), quedan como alternativa y como referencia de lo que
+hace el orquestador.
 
 Convenciones: `N` es el nombre del nodo, `G` el número de grupo y `NS=cattle-system`.
 
@@ -16,7 +19,9 @@ falta para:
 - crear los Plans, el Secret y el ConfigMap en `cattle-system`;
 - poner labels a los nodos;
 - leer Jobs y logs;
-- hacer `exec` en los pods de etcd (`check-cluster.sh`, `move-leader`).
+- hacer `exec` en los pods de etcd (`preflight.sh`, `rollout.sh`, `check-cluster.sh`).
+
+Los scripts del operador necesitan además `make tools` (usan `tools/bin/yq`) y `date` de GNU.
 
 Cómo obtenerlo:
 
@@ -54,9 +59,12 @@ NS=cattle-system
    `system-agent-upgrader*` de Rancher no deben coincidir con estos.
 4. **Snapshot de etcd reciente** (Rancher → cluster → Snapshots, o
    `kubectl get etcdsnapshotfiles`).
-5. **Estado sano:** `sh scripts/check-cluster.sh`: todos los nodos Ready, 3 miembros de etcd
-   sanos y un líder.
-6. **Definir los grupos** (si se va a trabajar por tandas, ver [paso 5](#5-ventana-por-grupos)):
+5. **Estado sano:** `sh scripts/preflight.sh` (solo lectura) comprueba de una vez el SUC, los
+   Plans, que no haya Plans de Rancher en curso, nodos Ready, etcd (miembros, salud, un líder,
+   RAFT INDEX igualado, alarmas), la antigüedad del último snapshot, PDBs que bloquearían el
+   drain y el espacio libre de los nodos. Sale con 1 si algo falla.
+   `sh scripts/check-cluster.sh` muestra el detalle (tablas de etcd, Jobs, pods con problemas).
+6. **Definir los grupos** (para pre-descargar y actualizar por tandas):
    un label `os-upgrade-group` por nodo. Sirve para pre-descargar y actualizar por grupos.
 
    ```sh
@@ -91,7 +99,13 @@ reinician en la ventana de parches habitual, antes de la ventana del upgrade.
 ## 3. Pre-descarga (días antes, sin impacto)
 
 Sin drain, sin cordon y sin reboot. Se puede lanzar por nodos o por grupos; el Plan descarga
-en 2 nodos a la vez (`concurrency`, ajustable en el overlay):
+en 2 nodos a la vez (`concurrency`, ajustable en el overlay). Con el orquestador:
+
+```sh
+sh scripts/rollout.sh predownload --group G --wait   # etiqueta, espera y resume avisos por nodo
+```
+
+Omite los nodos `done`, `hold` y los que están en `upgrade`. Sin `--wait` solo etiqueta. A mano:
 
 ```sh
 kubectl label node N1 N2 N3 os-upgrade=predownload --overwrite      # por nodos
@@ -113,11 +127,72 @@ Un nodo con la pre-descarga terminada tiene el label
 **Cuanto más cerca de la ventana, mejor:** lo que publique Ubuntu entre la pre-descarga y la
 ventana se descargará en la ventana.
 
-## 4. Ventana: un nodo cada vez
+## 4. Ventana con `rollout.sh` (recomendado)
+
+```sh
+sh scripts/preflight.sh --group G                     # solo lectura
+sh scripts/rollout.sh upgrade --group G --dry-run     # plan, orden y comprobaciones, sin cambiar nada
+sh scripts/rollout.sh upgrade --group G               # la ventana
+sh scripts/rollout.sh status --group G                # estado de los nodos del grupo
+```
+
+En vez de `--group G` se puede usar `--nodes n1,n2`. La ventana dura horas: ejecútalo dentro de
+`tmux` o `screen`. Si la sesión se corta, **relanzar el mismo comando** retoma el nodo en curso
+y omite los terminados (`done`) y los apartados (`hold`).
+
+### Qué hace
+
+1. Ordena los nodos: **workers → control plane no líderes → líder de etcd**, y muestra el plan.
+   Un grupo puede mezclar workers y control plane: el orquestador los hace de uno en uno.
+2. Comprueba el cluster: API, SUC, Plans aplicados, ningún Plan de Rancher en curso y snapshot
+   de etcd reciente. Pide confirmación para empezar.
+3. Para cada nodo:
+   1. **Antes:** nodos Ready, ningún otro nodo en upgrade, etcd sano (miembros, salud, un líder,
+      RAFT INDEX igualado, sin alarmas). Avisa si hay PDBs bloqueados en namespaces con pods en
+      el nodo. Si el nodo es el líder de etcd, hace `move-leader` a otro miembro (preferiblemente
+      ya actualizado) y comprueba que el liderazgo cambió.
+   2. **Lanza** el nodo (`os-upgrade=upgrade`) y **supervisa** las fases del Job: prepare, drain,
+      upgrade, reboot.
+   3. **Verifica** (reintentando hasta 5 min mientras se estabiliza): Ubuntu 24.04, kernel
+      objetivo, Ready, schedulable, Plan terminado, pods del nodo sanos, todos los DaemonSets
+      completos, etcd sano (si es control plane) y una prueba de DNS/red con un pod en ese nodo.
+   4. Marca el nodo `os-upgrade=done` y **pide confirmación** antes del siguiente.
+
+### Qué hace cuando algo va mal
+
+| Situación | Reacción | Estado del nodo |
+|---|---|---|
+| `prepare` falla o supera `--prepare-timeout` | Muestra el log de prepare, aparta el nodo y para | **Intacto**: ni cordoneado ni drenado. `os-upgrade=hold` |
+| El drain supera `--drain-timeout` | Muestra los pods que quedan y los PDBs bloqueados. Pregunta **[e]sperar** otro intervalo o **[a]bortar** (con `--yes`, aborta) | Al abortar: `hold` y **uncordon** (seguro: el upgrade no había empezado) |
+| El Job falla después de empezar el upgrade, o se supera `--node-timeout` | Muestra condiciones del Job y log, y para | **Cordoneado** y en `upgrade`: ver *Problemas frecuentes* |
+| La verificación no pasa | Para | En `upgrade` (no se marca `done`) |
+| Respondes "no" entre nodos | Para limpiamente | Los terminados quedan en `done` |
+
+Para reintentar un nodo apartado tras arreglar la causa: `kubectl label node N os-upgrade-` y
+relanzar el comando.
+
+### Opciones
+
+| Opción | Por defecto | Descripción |
+|---|---|---|
+| `--dry-run` | — | No cambia nada: muestra el plan, las acciones (`[dry-run] kubectl ...`) y hace las comprobaciones |
+| `--yes` | — | Sin preguntas. Ante un drain lento, aborta el nodo |
+| `--drain-timeout` | `30m` | Tiempo máximo de drain antes de preguntar |
+| `--prepare-timeout` | `15m` | Tiempo máximo del preflight del nodo |
+| `--node-timeout` | `4h` | Tiempo máximo por nodo (de etiquetar a Plan terminado) |
+| `--skip-net-test` | — | Omite la prueba de DNS (p. ej. si la imagen del Plan no está disponible para pods normales) |
+
+Variables de entorno: `SETTLE_TIMEOUT` (`5m`), `POLL_SECONDS` (`15`), `ETCD_MIN_MEMBERS` (`3`),
+`ETCD_RAFT_MAX_LAG` (`100`), `SNAPSHOT_MAX_AGE_HOURS` (`24`), `NS` (`cattle-system`).
+
+La prueba de DNS crea un pod temporal `os-upgrade-nettest-<nodo>` en `cattle-system`, con la
+imagen de los Plans, que ejecuta `getent hosts kubernetes.default.svc.cluster.local`.
+
+## 5. Ventana manual: un nodo cada vez
 
 Orden: **workers → control plane no líderes → control plane líder**.
 
-### 4.1 Lanzar
+### 5.1 Lanzar
 
 ```sh
 kubectl label node N os-upgrade=upgrade --overwrite
@@ -137,7 +212,7 @@ El Job ejecuta, en este orden:
 4. Tras el reboot el Job crea otro pod, que verifica, limpia y termina con éxito. El SUC hace el
    uncordon.
 
-### 4.2 Seguir
+### 5.2 Seguir
 
 ```sh
 kubectl -n $NS get jobs,pods -l upgrade.cattle.io/node=N -o wide -w
@@ -154,7 +229,7 @@ tail -f /var/log/dist-upgrade/main.log     # log del upgrader de Ubuntu
 sh /usr/local/sbin/os-upgrade.sh status    # resumen del estado
 ```
 
-### 4.3 Comprobar que terminó
+### 5.3 Comprobar que terminó
 
 ```sh
 PLAN=os-upgrade-workers    # u os-upgrade-cp
@@ -171,7 +246,7 @@ kubectl get pods -A -o wide --field-selector spec.nodeName=N | grep -v Running  
 sh scripts/check-cluster.sh                # control plane: 3 miembros etcd sanos y un líder
 ```
 
-### 4.4 Cerrar el nodo
+### 5.4 Cerrar el nodo
 
 ```sh
 kubectl label node N os-upgrade=done --overwrite
@@ -180,25 +255,25 @@ kubectl label node N os-upgrade=done --overwrite
 **Imprescindible:** sin este cambio, cualquier cambio futuro de los Plans (otro hash) volvería a
 lanzar el proceso en ese nodo.
 
-### 4.5 Control plane líder
+### 5.5 Control plane líder
 
-Antes de lanzar el nodo líder de etcd, mover el liderazgo a otro miembro ya actualizado:
+Antes de lanzar el nodo líder de etcd, mover el liderazgo a otro miembro ya actualizado. El
+contenedor de etcd de RKE2 **no tiene `/bin/sh`**: `etcdctl` se ejecuta directamente con
+`kubectl exec`, sin `sh -c`.
 
 ```sh
-POD=etcd-<nodo-lider>
-CERTS="--cacert /var/lib/rancher/rke2/server/tls/etcd/server-ca.crt \
-  --cert /var/lib/rancher/rke2/server/tls/etcd/server-client.crt \
-  --key /var/lib/rancher/rke2/server/tls/etcd/server-client.key"
-kubectl -n kube-system exec $POD -- sh -c "etcdctl $CERTS endpoint status --cluster -w table"  # ver IS LEADER
-kubectl -n kube-system exec $POD -- sh -c "etcdctl $CERTS member list -w table"              # ID del destino
-kubectl -n kube-system exec $POD -- sh -c "etcdctl $CERTS move-leader <ID-hex-destino>"
+POD=$(kubectl -n kube-system get pod -l component=etcd -o name | head -n1)
+CERTS="--cacert /var/lib/rancher/rke2/server/tls/etcd/server-ca.crt --cert /var/lib/rancher/rke2/server/tls/etcd/server-client.crt --key /var/lib/rancher/rke2/server/tls/etcd/server-client.key"
+kubectl -n kube-system exec $POD -- etcdctl $CERTS endpoint status --cluster -w table   # IS LEADER e ID
+kubectl -n kube-system exec $POD -- etcdctl $CERTS --endpoints=https://<IP-del-lider>:2379 move-leader <ID-hex-destino>
+kubectl -n kube-system exec $POD -- etcdctl $CERTS endpoint status --cluster -w table   # comprobar el cambio
 ```
 
-Comprobar con `endpoint status` que el líder cambió y luego seguir con 4.1.
+(`$CERTS` va sin comillas a propósito: son varias opciones.) Luego seguir con 5.1.
 
-## 5. Ventana: por grupos
+## 6. Ventana manual: por grupos
 
-Es la alternativa al paso 4 cuando hay muchos nodos. Se etiqueta un grupo entero de una vez y el
+Es la alternativa manual al paso 5 cuando hay muchos nodos (con `rollout.sh`, basta con `--group`). Se etiqueta un grupo entero de una vez y el
 SUC los procesa **de uno en uno** (`concurrency: 1`), sin esperar confirmación entre nodos.
 
 ### Cómo se comporta el SUC con un grupo (v0.16.3)
@@ -216,12 +291,12 @@ SUC los procesa **de uno en uno** (`concurrency: 1`), sin esperar confirmación 
 
 ### Reglas para formar los grupos
 
-1. **Grupo 1 = canario:** 1 o 2 workers. Verificarlos a fondo (4.3) antes de seguir.
+1. **Grupo 1 = canario:** 1 o 2 workers. Verificarlos a fondo (5.3) antes de seguir.
 2. **Workers:** grupos del tamaño que podáis vigilar en la ventana. Se drena de uno en uno, así
    que la capacidad del cluster solo pierde un nodo cada vez.
 3. **Control plane no líderes:** pueden ir juntos en un grupo (el SUC los hace de uno en uno con
    10 min entre ellos). Con 3 control plane, son 2 nodos.
-4. **Control plane líder:** siempre en un grupo propio, después de `move-leader` (4.5).
+4. **Control plane líder:** siempre en un grupo propio, después de `move-leader` (5.5).
 5. **Nodos con todos los roles:** cuentan como control plane (Plan `os-upgrade-cp`).
 
 ### Lanzar un grupo
@@ -247,11 +322,11 @@ kubectl get nodes -l "os-upgrade-group=$G,plan.upgrade.cattle.io/$PLAN=$H"   # t
 kubectl -n $NS get jobs -l upgrade.cattle.io/plan=$PLAN -w
 ```
 
-El seguimiento de cada nodo (logs, `journalctl`, `status`) es el mismo que en 4.2.
+El seguimiento de cada nodo (logs, `journalctl`, `status`) es el mismo que en 5.2.
 
 ### Cerrar el grupo
 
-Cuando todos los nodos del grupo estén terminados y verificados (4.3), se marcan como `done`.
+Cuando todos los nodos del grupo estén terminados y verificados (5.3), se marcan como `done`.
 El selector solo incluye los nodos cuyo hash coincide con el del Plan, así que nunca marca uno a
 medias:
 
@@ -290,7 +365,7 @@ El grupo se queda parado en ese nodo (ocupa el hueco). Opciones:
   del grupo lo excluye), revisarlo aparte y reanudar el grupo. Cuando esté arreglado, se lanza
   solo: `kubectl label node N os-upgrade=upgrade --overwrite`.
 
-## 6. Final de la campaña
+## 7. Final de la campaña
 
 - Todos los nodos con `os-upgrade=done` y `sh scripts/check-cluster.sh` sano.
 - Opcional: `kubectl delete -f out/<cluster>.yaml` y quitar los labels (`kubectl label node N os-upgrade-`).
