@@ -20,12 +20,18 @@ Qué hace en cada nodo:
 - Clusters RKE2 con Rancher y su SUC en `cattle-system` (probado con `rancher/system-upgrade-controller:v0.16.3`).
 - Nodos Ubuntu 22.04 (o 24.04, para solo cambiar de kernel), con GRUB.
 - Acceso de los nodos a un mirror de Ubuntu (directo, por proxy o mirror interno).
-- En tu equipo: `make`, `curl`, `kubectl` con acceso al cluster. El resto de herramientas
-  se descarga en versiones fijas con `make tools`.
+- En tu equipo: `make`, `curl` y `kubectl`. El resto de herramientas se descarga en versiones
+  fijas con `make tools`.
+- **Un kubeconfig del cluster downstream con permisos de cluster-admin** para exportar el CRD,
+  aplicar los Plans, etiquetar nodos y consultar etcd. `make render`/`make validate` no lo
+  necesitan. Cómo obtenerlo y precauciones con varios clusters:
+  [runbook → Acceso al cluster](docs/runbook.md#acceso-al-cluster-kubeconfig).
 
 ## Inicio rápido
 
 ```sh
+export KUBECONFIG=~/.kube/mi-cluster.yaml   # kubeconfig del cluster (cluster-admin)
+kubectl config current-context              # comprobar SIEMPRE a qué cluster apuntas
 make tools                                  # shellcheck, bats, kubeconform, kustomize, yq en tools/bin
 cp -r manifests/overlays/lab manifests/overlays/mi-cluster
 $EDITOR manifests/overlays/mi-cluster/config.env      # como mínimo KERNEL_VERSION
@@ -42,8 +48,11 @@ Los Plans solo actúan sobre nodos con el label `os-upgrade`:
 | `os-upgrade=predownload` | `os-upgrade-predownload` | Descarga paquetes. Sin drain ni reboot |
 | `os-upgrade=upgrade` | `os-upgrade-workers` / `os-upgrade-cp` | Preflight → drain → upgrade → 1 reboot |
 | `os-upgrade=done` | ninguno | Nodo terminado (lo pones tú al acabar) |
+| `os-upgrade=hold` | ninguno | Nodo apartado: se excluye al lanzar o reanudar un grupo |
 
-El procedimiento completo, nodo a nodo, está en el **[runbook](docs/runbook.md)**.
+El procedimiento completo está en el **[runbook](docs/runbook.md)**: nodo a nodo, o **por
+grupos** con un label `os-upgrade-group=<n>` (canario → workers → control plane no líderes →
+líder), en cuyo caso el SUC procesa cada grupo de uno en uno y se para si un nodo falla.
 
 ## Documentación
 

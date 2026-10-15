@@ -1,9 +1,41 @@
 # Runbook: upgrade de un cluster
 
-Procedimiento manual, nodo a nodo. En la iteración 2, `scripts/rollout.sh` automatizará los
-pasos 4 y 5 (labels, esperas, verificaciones y confirmación entre nodos).
+Procedimiento manual: nodo a nodo ([paso 4](#4-ventana-un-nodo-cada-vez)) o por grupos
+([paso 5](#5-ventana-por-grupos)). En la iteración 2, `scripts/rollout.sh` automatizará
+labels, esperas, verificaciones y confirmación entre nodos.
 
-Convenciones: `N` es el nombre del nodo y `NS=cattle-system`.
+Convenciones: `N` es el nombre del nodo, `G` el número de grupo y `NS=cattle-system`.
+
+## Acceso al cluster (kubeconfig)
+
+`make render` y `make validate` funcionan sin cluster. **Todo lo demás necesita un kubeconfig**
+del cluster downstream (no el del cluster de Rancher) con permisos de **cluster-admin**. Hacen
+falta para:
+
+- exportar el CRD;
+- crear los Plans, el Secret y el ConfigMap en `cattle-system`;
+- poner labels a los nodos;
+- leer Jobs y logs;
+- hacer `exec` en los pods de etcd (`check-cluster.sh`, `move-leader`).
+
+Cómo obtenerlo:
+
+- **Desde Rancher:** cluster → *Download KubeConfig*. Pasa por Rancher (por el
+  `cattle-cluster-agent`): mientras se drena el nodo donde corre ese agente, la conexión se corta
+  unos segundos y hay que relanzar los comandos con `-w` o `-f`.
+- **Desde un nodo control plane:** `/etc/rancher/rke2/rke2.yaml`, cambiando `server:
+  https://127.0.0.1:6443` por la IP o el FQDN de un control plane. Mejor uno que **no** se
+  esté actualizando en ese momento, o un balanceador delante de los tres.
+
+Con varios clusters, usa un archivo por cluster y comprueba **siempre** a cuál apuntas antes de
+aplicar o etiquetar nada:
+
+```sh
+export KUBECONFIG=~/.kube/<cluster>.yaml
+kubectl config current-context
+kubectl get nodes -o wide          # ¿son los nodos que esperas?
+NS=cattle-system
+```
 
 ## 0. Antes de la campaña (una vez por cluster)
 
@@ -24,6 +56,16 @@ Convenciones: `N` es el nombre del nodo y `NS=cattle-system`.
    `kubectl get etcdsnapshotfiles`).
 5. **Estado sano:** `sh scripts/check-cluster.sh`: todos los nodos Ready, 3 miembros de etcd
    sanos y un líder.
+6. **Definir los grupos** (si se va a trabajar por tandas, ver [paso 5](#5-ventana-por-grupos)):
+   un label `os-upgrade-group` por nodo. Sirve para pre-descargar y actualizar por grupos.
+
+   ```sh
+   kubectl label node w1 w2 os-upgrade-group=1        # canario: 1-2 workers
+   kubectl label node w3 w4 w5 w6 os-upgrade-group=2
+   kubectl label node cp2 cp3 os-upgrade-group=3      # control plane no líderes
+   kubectl label node cp1 os-upgrade-group=4          # control plane líder, siempre solo
+   kubectl get nodes -L os-upgrade-group,os-upgrade
+   ```
 
 ## 1. Generar y aplicar los Plans
 
@@ -48,10 +90,12 @@ reinician en la ventana de parches habitual, antes de la ventana del upgrade.
 
 ## 3. Pre-descarga (días antes, sin impacto)
 
-Sin drain, sin cordon y sin reboot. Por tandas, p. ej.:
+Sin drain, sin cordon y sin reboot. Se puede lanzar por nodos o por grupos; el Plan descarga
+en 2 nodos a la vez (`concurrency`, ajustable en el overlay):
 
 ```sh
-kubectl label node N1 N2 N3 os-upgrade=predownload --overwrite
+kubectl label node N1 N2 N3 os-upgrade=predownload --overwrite      # por nodos
+kubectl label node -l os-upgrade-group=G os-upgrade=predownload --overwrite   # por grupo
 kubectl -n $NS get jobs -l upgrade.cattle.io/plan=os-upgrade-predownload -w
 ```
 
@@ -152,7 +196,101 @@ kubectl -n kube-system exec $POD -- sh -c "etcdctl $CERTS move-leader <ID-hex-de
 
 Comprobar con `endpoint status` que el líder cambió y luego seguir con 4.1.
 
-## 5. Final de la campaña
+## 5. Ventana: por grupos
+
+Es la alternativa al paso 4 cuando hay muchos nodos. Se etiqueta un grupo entero de una vez y el
+SUC los procesa **de uno en uno** (`concurrency: 1`), sin esperar confirmación entre nodos.
+
+### Cómo se comporta el SUC con un grupo (v0.16.3)
+
+- **Uno detrás de otro:** cuando un nodo termina, el SUC empieza el siguiente del mismo Plan. No
+  verifica nada más entre medias (en el control plane espera `postCompleteDelay: 10m`).
+- **Orden no controlable:** dentro de un Plan, el SUC ordena los nodos por un hash de su UID, no
+  por nombre. Si el orden importa, separa los nodos en grupos distintos.
+- **Un fallo para el grupo:** un nodo cuyo Job falla sigue ocupando el hueco de `concurrency: 1`
+  y el SUC no empieza otro. Pero si se le **quita el label** a ese nodo, el SUC pasa al
+  siguiente del grupo (ver *Pausar o detener un grupo*).
+- **Workers y control plane van en paralelo:** son Plans distintos y `exclusive` no los
+  serializa. Un grupo debe ser **solo de workers o solo de control plane**, y no se lanza un grupo
+  de un tipo mientras haya otro del otro tipo en curso.
+
+### Reglas para formar los grupos
+
+1. **Grupo 1 = canario:** 1 o 2 workers. Verificarlos a fondo (4.3) antes de seguir.
+2. **Workers:** grupos del tamaño que podáis vigilar en la ventana. Se drena de uno en uno, así
+   que la capacidad del cluster solo pierde un nodo cada vez.
+3. **Control plane no líderes:** pueden ir juntos en un grupo (el SUC los hace de uno en uno con
+   10 min entre ellos). Con 3 control plane, son 2 nodos.
+4. **Control plane líder:** siempre en un grupo propio, después de `move-leader` (4.5).
+5. **Nodos con todos los roles:** cuentan como control plane (Plan `os-upgrade-cp`).
+
+### Lanzar un grupo
+
+El selector excluye los nodos ya terminados (`done`) y los apartados (`hold`), así que relanzar
+un grupo nunca repite nodos:
+
+```sh
+G=2
+SEL="os-upgrade-group=$G,os-upgrade notin (done,hold)"
+kubectl get nodes -l "$SEL" -L os-upgrade        # revisar qué nodos entran
+kubectl label node -l "$SEL" os-upgrade=upgrade --overwrite
+```
+
+### Seguir el grupo
+
+```sh
+PLAN=os-upgrade-workers    # u os-upgrade-cp
+H=$(kubectl -n $NS get plan $PLAN -o jsonpath='{.status.latestHash}')
+kubectl -n $NS get plan $PLAN -o jsonpath='{.status.applying}'; echo   # nodo en curso
+kubectl get nodes -l os-upgrade-group=$G -L os-upgrade -L plan.upgrade.cattle.io/$PLAN
+kubectl get nodes -l "os-upgrade-group=$G,plan.upgrade.cattle.io/$PLAN=$H"   # terminados
+kubectl -n $NS get jobs -l upgrade.cattle.io/plan=$PLAN -w
+```
+
+El seguimiento de cada nodo (logs, `journalctl`, `status`) es el mismo que en 4.2.
+
+### Cerrar el grupo
+
+Cuando todos los nodos del grupo estén terminados y verificados (4.3), se marcan como `done`.
+El selector solo incluye los nodos cuyo hash coincide con el del Plan, así que nunca marca uno a
+medias:
+
+```sh
+kubectl label node -l "os-upgrade-group=$G,plan.upgrade.cattle.io/$PLAN=$H" os-upgrade=done --overwrite
+kubectl get nodes -l os-upgrade-group=$G -L os-upgrade     # todos deben estar en done
+sh scripts/check-cluster.sh
+```
+
+Pasar al siguiente grupo solo con el cluster sano.
+
+### Pausar o detener un grupo
+
+Quitar el label a los nodos que **todavía no han empezado**. El que está en curso termina su
+proceso (no se puede parar un release upgrade a medias):
+
+```sh
+APPLYING=$(kubectl -n $NS get plan $PLAN -o jsonpath='{.status.applying[*]}')
+for n in $(kubectl get nodes -l "os-upgrade-group=$G,os-upgrade=upgrade" -o name | cut -d/ -f2); do
+  case " $APPLYING " in *" $n "*) echo "en curso, se deja: $n" ;; *) kubectl label node "$n" os-upgrade- ;; esac
+done
+```
+
+Para reanudar, se lanza el grupo otra vez con el mismo comando de *Lanzar un grupo*: solo
+entran los nodos pendientes.
+
+### Si un nodo del grupo falla
+
+El grupo se queda parado en ese nodo (ocupa el hueco). Opciones:
+
+- **Arreglarlo y continuar:** ver *Problemas frecuentes*. Cuando termine, el SUC sigue con el
+  resto del grupo.
+- **Apartarlo y que el grupo siga:** primero **pausar** el grupo (si no, el SUC empezará otro
+  nodo en cuanto se libere el hueco). Después apartar el nodo fallido con
+  `kubectl label node N os-upgrade=hold --overwrite` (ningún Plan lo selecciona y el relanzamiento
+  del grupo lo excluye), revisarlo aparte y reanudar el grupo. Cuando esté arreglado, se lanza
+  solo: `kubectl label node N os-upgrade=upgrade --overwrite`.
+
+## 6. Final de la campaña
 
 - Todos los nodos con `os-upgrade=done` y `sh scripts/check-cluster.sh` sano.
 - Opcional: `kubectl delete -f out/<cluster>.yaml` y quitar los labels (`kubectl label node N os-upgrade-`).
