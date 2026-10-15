@@ -32,6 +32,12 @@ NO_PROXY="${NO_PROXY:-}"
 MIN_FREE_ROOT_MB="${MIN_FREE_ROOT_MB:-5000}"
 MIN_FREE_BOOT_MB="${MIN_FREE_BOOT_MB:-300}"
 MAX_REBOOTS="${MAX_REBOOTS:-3}"
+# true: do-release-upgrade --allow-third-party. Mantiene las fuentes que no son mirrors
+# públicos de Ubuntu (mirror interno, repos de proveedores) si publican la versión destino;
+# sin él, el upgrader las desactiva y pasa a archive.ubuntu.com.
+ALLOW_THIRD_PARTY="${ALLOW_THIRD_PARTY:-true}"
+POST_UPGRADE_HOOK_RETRIES="${POST_UPGRADE_HOOK_RETRIES:-3}"
+POST_UPGRADE_HOOK_SLEEP="${POST_UPGRADE_HOOK_SLEEP:-20}"
 
 # Transición soportada. Parametrizable para el futuro, pero solo 22.04 -> 24.04 está probada.
 SOURCE_VERSION="${SOURCE_VERSION:-22.04}"
@@ -39,7 +45,7 @@ TARGET_VERSION="${TARGET_VERSION:-24.04}"
 TARGET_CODENAME="${TARGET_CODENAME:-noble}"
 
 # Claves que se guardan en disco para que host-phase (fuera del pod) use la misma configuración.
-CONFIG_KEYS="KERNEL_VERSION SINGLE_REBOOT REQUIRE_PREDOWNLOAD APT_MIRROR HTTP_PROXY HTTPS_PROXY NO_PROXY MIN_FREE_ROOT_MB MIN_FREE_BOOT_MB MAX_REBOOTS SOURCE_VERSION TARGET_VERSION TARGET_CODENAME"
+CONFIG_KEYS="KERNEL_VERSION SINGLE_REBOOT REQUIRE_PREDOWNLOAD APT_MIRROR HTTP_PROXY HTTPS_PROXY NO_PROXY MIN_FREE_ROOT_MB MIN_FREE_BOOT_MB MAX_REBOOTS ALLOW_THIRD_PARTY POST_UPGRADE_HOOK_RETRIES SOURCE_VERSION TARGET_VERSION TARGET_CODENAME"
 
 # ------------------------------------------------------------------ rutas del host
 STATE_DIR="$ROOT/var/lib/os-upgrade"
@@ -53,7 +59,10 @@ RELEASE_DONE_FILE="$STATE_DIR/release-upgrade.done"
 TIMERS_STATE_FILE="$STATE_DIR/timers.state"
 ARCHIVES_DIR="$STATE_DIR/archives"
 ALT_APT_DIR="$STATE_DIR/apt"
+STARTED_AT_FILE="$STATE_DIR/started-at"
+# Log de todas las fases en formato clave=valor (persiste entre reboots) e informe final.
 LOG_FILE="$ROOT/var/log/os-upgrade.log"
+REPORT_FILE="$ROOT/var/log/os-upgrade-report.txt"
 
 HOST_SCRIPT_PATH="/usr/local/sbin/os-upgrade.sh"     # ruta vista por systemd del host
 HOST_SCRIPT="$ROOT$HOST_SCRIPT_PATH"
@@ -79,20 +88,29 @@ APT_TIMERS="apt-daily.timer apt-daily-upgrade.timer"
 
 SELF="$0"
 PHASE="${1:-}"
+# Hook opcional del overlay: viaja en el mismo Secret que este script.
+POST_UPGRADE_HOOK_FILE="${POST_UPGRADE_HOOK_FILE:-$(dirname "$SELF")/post-upgrade-hook.sh}"
 
 export DEBIAN_FRONTEND=noninteractive
 export RELEASE_UPGRADER_NO_SCREEN=1
 
 # ------------------------------------------------------------------ utilidades
+# Salida legible en el pod; en el archivo del host, una línea clave=valor por evento:
+#   ts=... node=... phase=... level=... msg="..."
 log() {
   level=$1
   shift
-  line="$(date -Is) $(hostname) ${PHASE:-?} $level $*"
-  echo "$line"
-  { mkdir -p "$(dirname "$LOG_FILE")" && echo "$line" >> "$LOG_FILE"; } 2>/dev/null || true
+  ts=$(date -Is)
+  echo "$ts $(hostname) ${PHASE:-?} $level $*"
+  msg=$(printf '%s' "$*" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  { mkdir -p "$(dirname "$LOG_FILE")" \
+      && printf 'ts=%s node=%s phase=%s level=%s msg="%s"\n' "$ts" "$(hostname)" "${PHASE:-?}" "$level" "$msg" >> "$LOG_FILE"
+  } 2>/dev/null || true
 }
 info() { log INFO "$@"; }
 warn() { log WARN "$@"; }
+# Marca de paso: "PASO 3/7: ..." para seguir el avance en los logs del pod.
+step() { log INFO "PASO $1: $2"; }
 
 # Error que se puede reintentar: el Job vuelve a intentarlo, no deja marca.
 die() {
@@ -158,12 +176,12 @@ validate_config() {
   [ -n "$KERNEL_VERSION" ] || die "KERNEL_VERSION no está definido (p. ej. 6.8.0-139-generic)"
   echo "$KERNEL_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+-generic$' \
     || die "KERNEL_VERSION inválido: '$KERNEL_VERSION' (formato esperado: 6.8.0-139-generic)"
-  for v in SINGLE_REBOOT REQUIRE_PREDOWNLOAD; do
+  for v in SINGLE_REBOOT REQUIRE_PREDOWNLOAD ALLOW_THIRD_PARTY; do
     eval "val=\$$v"
     # shellcheck disable=SC2154 # val se asigna con eval
     case "$val" in true|false) ;; *) die "$v debe ser true o false (valor: '$val')" ;; esac
   done
-  for v in MIN_FREE_ROOT_MB MIN_FREE_BOOT_MB MAX_REBOOTS; do
+  for v in MIN_FREE_ROOT_MB MIN_FREE_BOOT_MB MAX_REBOOTS POST_UPGRADE_HOOK_RETRIES; do
     eval "val=\$$v"
     case "$val" in ''|*[!0-9]*) die "$v debe ser un número entero (valor: '$val')" ;; esac
   done
@@ -238,6 +256,103 @@ predownload_matches() {
   grep -qx "TARGET_VERSION=$TARGET_VERSION" "$PREDOWNLOAD_FILE" || return 1
   for p in $(kernel_packages); do
     ls "$ARCHIVES_DIR/${p}_"*.deb >/dev/null 2>&1 || return 1
+  done
+}
+
+# ------------------------------------------------------------------ fuentes de apt
+# Fuentes configuradas: "archivo<TAB>uri<TAB>suites<TAB>estado" (estado: on|off).
+# Entiende sources.list/*.list (una línea por entrada) y *.sources (deb822).
+list_sources() {
+  for f in "$ROOT/etc/apt/sources.list" "$ROOT"/etc/apt/sources.list.d/*.list; do
+    [ -f "$f" ] || continue
+    awk -v f="${f#"$ROOT"}" '
+      /^[[:space:]]*deb[[:space:]]/ {
+        sub(/\[[^]]*\]/, ""); print f "\t" $2 "\t" $3 "\ton"; next }
+      /^#[[:space:]]*deb[[:space:]].*disabled on upgrade/ {
+        sub(/^#[[:space:]]*/, ""); sub(/\[[^]]*\]/, ""); print f "\t" $2 "\t" $3 "\toff" }
+    ' "$f"
+  done
+  for f in "$ROOT"/etc/apt/sources.list.d/*.sources; do
+    [ -f "$f" ] || continue
+    awk -v f="${f#"$ROOT"}" '
+      function flush() { if (uris != "") { n = split(uris, u, " "); for (i = 1; i <= n; i++) print f "\t" u[i] "\t" suites "\t" (enabled ? "on" : "off") } uris = ""; suites = ""; enabled = 1 }
+      BEGIN { enabled = 1 }
+      /^[[:space:]]*$/ { flush(); next }
+      /^Enabled:/ { enabled = ($2 != "no") }
+      /^URIs:/ { $1 = ""; sub(/^ /, ""); uris = $0 }
+      /^Suites:/ { $1 = ""; sub(/^ /, ""); suites = $0 }
+      END { flush() }
+    ' "$f"
+  done
+}
+
+# Mirrors públicos de Ubuntu (lo que do-release-upgrade reconoce sin --allow-third-party).
+is_official_uri() {
+  echo "$1" | grep -Eq '^[a-z]+://([a-z0-9-]+\.)*(archive|security|ports)\.ubuntu\.com(/|$)'
+}
+
+third_party_sources() {
+  list_sources | awk -F'\t' '$4 == "on"' | while IFS="$(printf '\t')" read -r file uri suites _; do
+    is_official_uri "$uri" || echo "$uri ($suites, $file)"
+  done | sort -u
+}
+
+disabled_sources() {
+  list_sources | awk -F'\t' '$4 == "off" {print $2 " (" $3 ", " $1 ")"}' | sort -u
+}
+
+# Informa de las fuentes que no son mirrors públicos de Ubuntu y de cómo las tratará el
+# upgrade. Sin ALLOW_THIRD_PARTY, un mirror interno de Ubuntu se desactivaría: se para.
+check_sources() {
+  tp=$(third_party_sources)
+  [ -n "$tp" ] || return 0
+  if is_true "$ALLOW_THIRD_PARTY"; then
+    info "fuentes no oficiales (se mantienen si publican $TARGET_CODENAME, si no se desactivan): $(echo "$tp" | tr '\n' ';')"
+    return 0
+  fi
+  mirror=$(APT_MIRROR="" detect_mirror)
+  if ! is_official_uri "$mirror"; then
+    die "el mirror de Ubuntu del nodo ($mirror) no es un mirror público: con ALLOW_THIRD_PARTY=false do-release-upgrade lo desactivaría y usaría archive.ubuntu.com. Usar ALLOW_THIRD_PARTY=true"
+  fi
+  warn "fuentes no oficiales que el upgrade desactivará (ALLOW_THIRD_PARTY=false): $(echo "$tp" | tr '\n' ';')"
+}
+
+# Paquetes retenidos (apt-mark hold) ajenos al kernel fijado: pueden impedir el release upgrade.
+held_packages() {
+  apt-mark showhold 2>/dev/null | grep -vxF "$(kernel_packages | tr ' ' '\n')" | sort -u || true
+}
+
+check_held() {
+  held=$(held_packages)
+  [ -z "$held" ] || warn "paquetes retenidos (apt-mark hold) que pueden bloquear el release upgrade: $(echo "$held" | tr '\n' ' ')"
+}
+
+# ------------------------------------------------------------------ hook post-upgrade
+check_hook_syntax() {
+  [ -f "$POST_UPGRADE_HOOK_FILE" ] || return 0
+  sh -n "$POST_UPGRADE_HOOK_FILE" 2>/dev/null \
+    || die "el hook post-upgrade tiene errores de sintaxis: $POST_UPGRADE_HOOK_FILE"
+}
+
+# Ejecuta el hook del overlay (si existe) con reintentos. Si no pasa, el nodo queda marcado:
+# el sistema está actualizado pero algo propio del entorno no funciona.
+run_post_upgrade_hook() {
+  [ -f "$POST_UPGRADE_HOOK_FILE" ] || { HOOK_RESULT="sin hook"; return 0; }
+  attempt=1
+  while :; do
+    info "Hook post-upgrade (intento $attempt/$POST_UPGRADE_HOOK_RETRIES)"
+    if out=$(NODE_NAME="${SYSTEM_UPGRADE_NODE_NAME:-$(hostname)}" KERNEL_VERSION="$KERNEL_VERSION" \
+        TARGET_VERSION="$TARGET_VERSION" sh "$POST_UPGRADE_HOOK_FILE" 2>&1); then
+      echo "$out" | while IFS= read -r l; do info "hook: $l"; done
+      HOOK_RESULT="OK"
+      return 0
+    fi
+    echo "$out" | while IFS= read -r l; do warn "hook: $l"; done
+    if [ "$attempt" -ge "$POST_UPGRADE_HOOK_RETRIES" ]; then
+      fail_hard "el hook post-upgrade falló $attempt veces; el sistema está en $TARGET_VERSION pero la verificación propia no pasa"
+    fi
+    attempt=$((attempt + 1))
+    sleep "$POST_UPGRADE_HOOK_SLEEP"
   done
 }
 
@@ -420,7 +535,7 @@ wait_for_unit() {
 }
 
 finalize() {
-  info "Nodo en $TARGET_VERSION con kernel $KERNEL_VERSION. Cerrando"
+  step "7/7" "verificación y cierre: Ubuntu $TARGET_VERSION con kernel $KERNEL_VERSION"
   # Idempotente: también deja fijado el kernel en nodos que ya lo tenían arrancado.
   apply_kernel_policy
   purge_other_kernels false
@@ -429,15 +544,49 @@ finalize() {
   configure_grub
   apt_get autoremove --purge || warn "autoremove falló (no crítico)"
   restore_host
-  rm -rf "$ARCHIVES_DIR" "$ALT_APT_DIR"
-  rm -f "$REBOOTS_FILE" "$RELEASE_STARTED_FILE" "$RELEASE_DONE_FILE" "$PREDOWNLOAD_FILE"
   if [ -f "$ROOT/run/reboot-required" ]; then
     warn "hay un reboot pendiente por paquetes posteriores; no se reinicia (un solo reboot por ventana)"
   fi
   systemctl is-active --quiet rke2-server || systemctl is-active --quiet rke2-agent \
     || die "rke2 no está activo tras el upgrade"
+  disabled=$(disabled_sources)
+  if [ -n "$disabled" ]; then
+    warn "fuentes desactivadas por el upgrade (revisar y reactivar a mano si hacen falta): $(echo "$disabled" | tr '\n' ';')"
+  fi
+  HOOK_RESULT=""
+  run_post_upgrade_hook
+  write_report "$disabled"
+  rm -rf "$ARCHIVES_DIR" "$ALT_APT_DIR"
+  rm -f "$REBOOTS_FILE" "$RELEASE_STARTED_FILE" "$RELEASE_DONE_FILE" "$PREDOWNLOAD_FILE" "$STARTED_AT_FILE"
   printf 'date=%s\nos=%s\nkernel=%s\n' "$(date -Is)" "$(os_version)" "$(running_kernel)" > "$DONE_FILE"
-  info "OK: Ubuntu $(os_version), kernel $(running_kernel)"
+  info "OK: Ubuntu $(os_version), kernel $(running_kernel). Informe en ${REPORT_FILE#"$ROOT"}"
+}
+
+# Informe que se queda en el nodo. Solo se escribe la primera vez que el nodo termina
+# (las ejecuciones posteriores del Job en un nodo ya terminado no lo pisan).
+write_report() {
+  [ ! -f "$DONE_FILE" ] || return 0
+  started=$(cat "$STARTED_AT_FILE" 2>/dev/null || true)
+  duration="?"
+  if [ -n "$started" ]; then
+    secs=$(( $(date +%s) - $(date -d "$started" +%s) ))
+    duration="$((secs / 60)) min"
+  fi
+  {
+    echo "os-upgrade: informe de $(hostname)"
+    echo "terminado:      $(date -Is)"
+    echo "inicio:         ${started:-?}"
+    echo "duración:       $duration"
+    echo "sistema:        Ubuntu $(os_version)"
+    echo "kernel:         $(running_kernel) (fijado: $KERNEL_VERSION)"
+    echo "reboots:        $(cat "$REBOOTS_FILE" 2>/dev/null || echo 0)"
+    echo "hook:           ${HOOK_RESULT:-sin hook}"
+    echo "fuentes desactivadas por el upgrade:"
+    if [ -n "$1" ]; then echo "$1" | sed 's/^/  /'; else echo "  ninguna"; fi
+    echo "paquetes retenidos (además del kernel):"
+    held=$(held_packages)
+    if [ -n "$held" ]; then echo "$held" | sed 's/^/  /'; else echo "  ninguno"; fi
+  } > "$REPORT_FILE"
 }
 
 # ------------------------------------------------------------------ apt alternativo (predownload)
@@ -506,6 +655,9 @@ cmd_prepare() {
     *) die "versión no soportada: $version (se espera $SOURCE_VERSION o $TARGET_VERSION)" ;;
   esac
   check_space
+  check_hook_syntax
+  check_sources
+  check_held
 
   if predownload_matches; then
     info "Pre-descarga presente para $KERNEL_VERSION"
@@ -546,6 +698,8 @@ cmd_predownload() {
     *) die "versión no soportada: $version" ;;
   esac
   check_space
+  check_sources
+  check_held
 
   mirror=$(detect_mirror)
   info "Pre-descargando $TARGET_VERSION ($TARGET_CODENAME) y kernel $KERNEL_VERSION desde $mirror"
@@ -586,6 +740,11 @@ cmd_upgrade() {
   export_proxy_env
   mkdir -p "$STATE_DIR"
   write_config
+  # Inicio de un proceso nuevo (también un cambio de kernel en un nodo ya actualizado antes).
+  if [ ! -f "$STARTED_AT_FILE" ] && ! is_done; then
+    date -Is > "$STARTED_AT_FILE"
+    rm -f "$DONE_FILE"
+  fi
   info "Estado: Ubuntu $(os_version), kernel $(running_kernel); objetivo $TARGET_VERSION + $KERNEL_VERSION"
 
   if is_done; then
@@ -600,11 +759,13 @@ cmd_upgrade() {
 
   case "$(os_version)" in
     "$SOURCE_VERSION")
+      step "1/7" "preparar el host (apt, needrestart, timers de unattended-upgrades)"
       check_space
       configure_host
       recover_dpkg
+      step "2/7" "quitar metapaquetes de kernel y fijar $KERNEL_VERSION"
       apply_kernel_policy
-      info "Actualizando $SOURCE_VERSION al último nivel de parches"
+      step "3/7" "actualizar $SOURCE_VERSION al último nivel de parches"
       apt-get -o DPkg::Lock::Timeout=600 update || die "apt-get update falló"
       apt_get full-upgrade || die "apt-get full-upgrade falló"
       apt_get install update-manager-core || die "no se pudo instalar update-manager-core"
@@ -613,6 +774,7 @@ cmd_upgrade() {
         warn "do-release-upgrade exige reiniciar antes por: $needs"
         reboot_now "reboot previo al release upgrade"
       fi
+      step "4/7" "release upgrade a $TARGET_VERSION en la unidad $UNIT del host"
       install_host_script
       systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
       systemd-run --unit="$UNIT" --description="os-upgrade: Ubuntu $SOURCE_VERSION -> $TARGET_VERSION" \
@@ -622,9 +784,12 @@ cmd_upgrade() {
     "$TARGET_VERSION")
       # Ya en la versión destino pero sin el kernel fijado arrancado: nodo que ya estaba
       # en 24.04 (solo cambio de kernel) o GRUB arrancó otro kernel.
+      step "1/7" "preparar el host"
       configure_host
       recover_dpkg
+      step "5/7" "instalar y fijar el kernel $KERNEL_VERSION y GRUB"
       ensure_kernel
+      step "6/7" "reboot"
       reboot_now "arrancar kernel $KERNEL_VERSION"
       ;;
     *)
@@ -639,8 +804,11 @@ cmd_host_phase() {
   [ ! -f "$FAILED_FILE" ] || exit 1
   stage_archives
   date -Is > "$RELEASE_STARTED_FILE"
-  info "do-release-upgrade a $TARGET_VERSION"
-  do-release-upgrade -f DistUpgradeViewNonInteractive \
+  third_party=""
+  if is_true "$ALLOW_THIRD_PARTY"; then third_party="--allow-third-party"; fi
+  info "do-release-upgrade a $TARGET_VERSION ${third_party:-(sin --allow-third-party)}"
+  # shellcheck disable=SC2086 # third_party es una opción o nada
+  do-release-upgrade -f DistUpgradeViewNonInteractive $third_party \
     || fail_hard "do-release-upgrade terminó con error; ver /var/log/dist-upgrade/"
   version=$(os_version)
   [ "$version" = "$TARGET_VERSION" ] || fail_hard "tras do-release-upgrade la versión es $version"
@@ -648,7 +816,9 @@ cmd_host_phase() {
   # entra por la rama de la versión destino (instalar kernel + GRUB + reboot).
   date -Is > "$RELEASE_DONE_FILE"
   recover_dpkg
+  step "5/7" "instalar y fijar el kernel $KERNEL_VERSION y GRUB"
   ensure_kernel
+  step "6/7" "reboot"
   reboot_now "arrancar $TARGET_VERSION con kernel $KERNEL_VERSION"
 }
 
@@ -663,6 +833,7 @@ cmd_status() {
     [ -f "$f" ] && echo "$(basename "$f"): $(tr '\n' ' ' < "$f")"
   done
   if [ -f "$GRUB_DEFAULT_FILE" ]; then grep '^GRUB_DEFAULT=' "$GRUB_DEFAULT_FILE"; fi
+  if [ -f "$REPORT_FILE" ]; then echo; cat "$REPORT_FILE"; fi
   return 0
 }
 

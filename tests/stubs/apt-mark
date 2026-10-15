@@ -7,5 +7,6 @@ shift
 case "$sub" in
   hold) for p in "$@"; do grep -qx "$p" "$STUB_STATE/held" 2>/dev/null || echo "$p" >> "$STUB_STATE/held"; done ;;
   manual) for p in "$@"; do echo "$p" >> "$STUB_STATE/manual"; done ;;
+  showhold) cat "$STUB_STATE/held" 2>/dev/null || true ;;
 esac
 exit 0

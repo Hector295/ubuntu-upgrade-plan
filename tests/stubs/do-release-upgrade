@@ -4,4 +4,9 @@
 record "do-release-upgrade $*"
 fail_if do-release-upgrade
 sed -i "s/^VERSION_ID=.*/VERSION_ID=\"${TARGET_VERSION:-24.04}\"/" "$ROOT/etc/os-release"
+# Simula que el upgrader desactiva una fuente de terceros, como hace sin --allow-third-party.
+if [ -f "$STUB_STATE/dru-disable-vendor" ]; then
+  mkdir -p "$ROOT/etc/apt/sources.list.d"
+  echo "# deb http://repo.vendor.example/apt noble main # disabled on upgrade to noble" > "$ROOT/etc/apt/sources.list.d/vendor.list"
+fi
 exit 0
