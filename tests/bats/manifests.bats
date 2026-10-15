@@ -127,3 +127,52 @@ edit() { "$YQ" -i "$1" "$M"; }
   [ "$status" -eq 2 ]
   [[ "$output" == *"kubectl get crd plans.upgrade.cattle.io -o json"* ]]
 }
+
+# Overlay temporal dentro del repo (kustomize no admite rutas absolutas a la base).
+make_overlay_with_hook() {
+  OVL="$REPO/manifests/overlays/.bats-$$"
+  mkdir -p "$OVL"
+  echo "KERNEL_VERSION=6.8.0-139-generic" > "$OVL/config.env"
+  cp "$1" "$OVL/post-upgrade-hook.sh"
+  cat > "$OVL/kustomization.yaml" <<'YAML'
+resources:
+  - ../../base
+configMapGenerator:
+  - name: os-upgrade-config
+    behavior: merge
+    envs: [config.env]
+secretGenerator:
+  - name: os-upgrade-script
+    behavior: merge
+    files:
+      - post-upgrade-hook.sh
+YAML
+  "$REPO/tools/bin/kustomize" build --load-restrictor LoadRestrictionsNone "$OVL" > "$M"
+  rm -rf "$OVL"
+}
+
+@test "hook: el overlay lo añade al Secret junto a upgrade.sh y se valida" {
+  make_overlay_with_hook "$REPO/docs/ejemplos/post-upgrade-hook.sh"
+  [ "$("$YQ" 'select(.kind == "Secret") | .data | keys | join(",")' "$M")" = "post-upgrade-hook.sh,upgrade.sh" ]
+  "$YQ" 'select(.kind == "Secret") | .data["post-upgrade-hook.sh"]' "$M" | base64 -d | cmp - "$REPO/docs/ejemplos/post-upgrade-hook.sh"
+  run sh "$VALIDATE" "$M" "$SCHEMA"
+  [ "$status" -eq 0 ]
+}
+
+@test "hook: un error de sintaxis se detecta al validar" {
+  printf 'if true; then\necho x\n' > "$BATS_TEST_TMPDIR/bad.sh"
+  make_overlay_with_hook "$BATS_TEST_TMPDIR/bad.sh"
+  run sh "$VALIDATE" "$M" "$SCHEMA"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"post-upgrade-hook.sh tiene errores de sintaxis"* ]]
+}
+
+@test "validación: ALLOW_THIRD_PARTY y POST_UPGRADE_HOOK_RETRIES" {
+  [ "$("$YQ" 'select(.kind == "ConfigMap") | .data.ALLOW_THIRD_PARTY' "$M")" = true ]
+  edit '(select(.kind == "ConfigMap") | .data.ALLOW_THIRD_PARTY) = "yes"'
+  edit '(select(.kind == "ConfigMap") | .data.POST_UPGRADE_HOOK_RETRIES) = "x"'
+  run sh "$VALIDATE" "$M" "$SCHEMA"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ALLOW_THIRD_PARTY debe ser true o false"* ]]
+  [[ "$output" == *"POST_UPGRADE_HOOK_RETRIES debe ser un número entero"* ]]
+}

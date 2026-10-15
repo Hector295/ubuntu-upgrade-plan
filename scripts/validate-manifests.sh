@@ -96,10 +96,10 @@ if [ -z "$kernel" ]; then
 elif ! echo "$kernel" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+-generic$'; then
   error "KERNEL_VERSION inválido: '$kernel' (formato esperado: 6.8.0-139-generic)"
 fi
-for key in SINGLE_REBOOT REQUIRE_PREDOWNLOAD; do
+for key in SINGLE_REBOOT REQUIRE_PREDOWNLOAD ALLOW_THIRD_PARTY; do
   case "$(cfg "$key")" in true|false) ;; *) error "$key debe ser true o false" ;; esac
 done
-for key in MIN_FREE_ROOT_MB MIN_FREE_BOOT_MB MAX_REBOOTS; do
+for key in MIN_FREE_ROOT_MB MIN_FREE_BOOT_MB MAX_REBOOTS POST_UPGRADE_HOOK_RETRIES; do
   case "$(cfg "$key")" in ''|*[!0-9]*) error "$key debe ser un número entero" ;; esac
 done
 for key in HTTP_PROXY HTTPS_PROXY APT_MIRROR; do
@@ -109,6 +109,13 @@ for key in HTTP_PROXY HTTPS_PROXY APT_MIRROR; do
     *) error "$key debe empezar por http:// o https:// (valor: '$val')" ;;
   esac
 done
+
+# Hook post-upgrade opcional (clave post-upgrade-hook.sh del Secret): sintaxis de sh.
+hook=$("$YQ" ea '[.] | map(select(.kind == "Secret" and (.metadata.name | test("^os-upgrade-script")))) | .[0].data["post-upgrade-hook.sh"] // ""' "$MANIFESTS")
+if [ -n "$hook" ]; then
+  echo "$hook" | base64 -d > "$work/hook.sh"
+  sh -n "$work/hook.sh" 2>"$work/hook.err" || error "post-upgrade-hook.sh tiene errores de sintaxis: $(cat "$work/hook.err")"
+fi
 
 if [ "$errors" -gt 0 ]; then
   echo "Validación fallida: $errors error(es) en $MANIFESTS"
