@@ -1,5 +1,5 @@
 #!/bin/sh
-# Stub de apt-get: registra la llamada y simula efectos sobre $STUB_STATE/installed y $ROOT/boot.
+# apt-get stub: records the call and simulates its effects on $STUB_STATE/installed and $ROOT/boot.
 # shellcheck source=_lib.sh
 . "$(dirname "$0")/_lib.sh"
 record "apt-get $*"

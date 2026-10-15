@@ -1,8 +1,8 @@
 #!/bin/sh
-# Orquestador del upgrade: lanza los nodos de uno en uno, supervisa cada fase, verifica el
-# resultado y pide confirmación antes del siguiente.
+# Upgrade orchestrator: launches nodes one at a time, watches every phase, verifies the
+# result and asks for confirmation before the next one.
 #
-# Uso:
+# Usage:
 #   rollout.sh predownload (--group G | --nodes n1,n2) [--wait] [--dry-run] [--yes]
 #   rollout.sh upgrade     (--group G | --nodes n1,n2) [--dry-run] [--yes]
 #                          [--drain-timeout 30m] [--prepare-timeout 15m] [--node-timeout 4h]
@@ -10,13 +10,13 @@
 #   rollout.sh status      [--group G | --nodes n1,n2]
 #
 # upgrade:
-#   orden          workers -> control plane no líderes -> líder de etcd (move-leader antes)
-#   antes de cada  API, SUC, Plans, nodos Ready, etcd sano, nada más en upgrade
-#   durante        prepare y drain con timeout: si fallan, el nodo se aparta (os-upgrade=hold)
-#                  sin haberse tocado; si falla el upgrade, se para y se deja como está
-#   después        versión destino + kernel, Ready, DaemonSets, pods, DNS, etcd -> os-upgrade=done
-#   --dry-run      muestra el plan y hace las comprobaciones, sin cambiar nada
-#   --yes          sin preguntas (al vencer el drain, aborta el nodo)
+#   order          workers -> non-leader control planes -> etcd leader (move-leader first)
+#   before each    API, SUC, Plans, nodes Ready, etcd healthy, nothing else upgrading
+#   during         prepare and drain with timeouts: if they fail, the node is held
+#                  (os-upgrade=hold) untouched; if the upgrade fails, it stops and leaves it as is
+#   after          target version + kernel, Ready, DaemonSets, pods, DNS, etcd -> os-upgrade=done
+#   --dry-run      shows the plan and runs the checks, without changing anything
+#   --yes          no questions (when the drain times out, the node is aborted)
 set -eu
 
 # shellcheck source=lib/common.sh
@@ -40,7 +40,7 @@ usage() {
   exit 2
 }
 
-# ------------------------------------------------------------------ argumentos
+# ------------------------------------------------------------------ arguments
 MODE=${1:-}
 [ -n "$MODE" ] || usage
 shift
@@ -58,11 +58,11 @@ while [ $# -gt 0 ]; do
     --node-timeout) [ $# -ge 2 ] || usage; NODE_TIMEOUT=$2; shift 2 ;;
     --skip-net-test) SKIP_NET_TEST=true; shift ;;
     -h|--help) usage ;;
-    *) err "opción desconocida: $1"; usage ;;
+    *) err "unknown option: $1"; usage ;;
   esac
 done
 seconds_of() {
-  to_seconds "$2" || die "duración inválida en $1: '$2' (usar p. ej. 90s, 30m, 2h)"
+  to_seconds "$2" || die "invalid duration in $1: '$2' (use e.g. 90s, 30m, 2h)"
 }
 DRAIN_TIMEOUT_S=$(seconds_of --drain-timeout "$DRAIN_TIMEOUT")
 PREPARE_TIMEOUT_S=$(seconds_of --prepare-timeout "$PREPARE_TIMEOUT")
@@ -70,7 +70,7 @@ NODE_TIMEOUT_S=$(seconds_of --node-timeout "$NODE_TIMEOUT")
 SETTLE_TIMEOUT_S=$(seconds_of SETTLE_TIMEOUT "$SETTLE_TIMEOUT")
 PREDOWNLOAD_TIMEOUT_S=$(seconds_of PREDOWNLOAD_TIMEOUT "$PREDOWNLOAD_TIMEOUT")
 
-# ------------------------------------------------------------------ selección de nodos
+# ------------------------------------------------------------------ node selection
 selected_nodes() {
   if [ -n "$NODES_ARG" ]; then
     echo "$NODES_ARG" | tr ',' '\n' | sed '/^$/d'
@@ -79,20 +79,20 @@ selected_nodes() {
   elif [ "$MODE" = status ]; then
     nodes_json | jq_ '.items[].metadata.name' | sort
   else
-    die "indicar --group G o --nodes n1,n2"
+    die "specify --group G or --nodes n1,n2"
   fi
 }
 
-# ------------------------------------------------------------------ fases de un nodo
-# Estado de un contenedor del pod: "estado código inicio" (estado: running|terminated|waiting).
+# ------------------------------------------------------------------ node phases
+# State of a pod container: "state code start" (state: running|terminated|waiting).
 ctr_state() {
   list=$2
   echo "$1" | jq_ "(.status.$list // [])[] | select(.name == \"$3\") | ((.state | keys | .[0]) + \" \" + ((.state.terminated.exitCode // \"-\") | tostring) + \" \" + (.state.running.startedAt // .state.terminated.startedAt // \"-\"))"
 }
 
-# Fase del pod más reciente y su hora de inicio (epoch): "<fase> <inicio>".
-# Fases: none|starting|prepare|prepare-failed|drain|drain-failed|upgrade|upgrade-ended.
-# Se devuelve todo por stdout: la función se llama dentro de $(...).
+# Phase of the newest pod and its start time (epoch): "<phase> <start>".
+# Phases: none|starting|prepare|prepare-failed|drain|drain-failed|upgrade|upgrade-ended.
+# Everything is returned on stdout: the function is called inside $(...).
 pod_phase() {
   pod=$1
   start=$(now)
@@ -130,25 +130,25 @@ job_failed() {
 
 node_pod_name() { node_pod_json "$1" "$2" | jq_ '.metadata.name // ""'; }
 
-# Aparta el nodo: ningún Plan lo vuelve a seleccionar y su Job se borra.
+# Holds the node: no Plan selects it again and its Job is deleted.
 hold_node() {
   mutate k label node "$1" os-upgrade=hold --overwrite >/dev/null
   mutate k -n "$NS" delete job -l "upgrade.cattle.io/plan=$2,upgrade.cattle.io/node=$1" --ignore-not-found >/dev/null
-  info "$1: apartado con os-upgrade=hold y Job borrado"
+  info "$1: held with os-upgrade=hold and Job deleted"
 }
 
 show_logs() {
   pod=$(node_pod_name "$1" "$2")
   [ -n "$pod" ] || return 0
-  echo "----- últimas líneas de $3 ($pod)"
+  echo "----- last lines of $3 ($pod)"
   k -n "$NS" logs "$pod" -c "$3" --tail=25 2>&1 | sed 's/^/  /' || true
   echo "-----"
 }
 
-# Pods que el drain todavía no ha desalojado (sin DaemonSets ni pods estáticos).
+# Pods the drain has not evicted yet (excluding DaemonSets and static pods).
 show_drain_blockers() {
   node=$1
-  echo "Pods que siguen en $node:"
+  echo "Pods still on $node:"
   k get pods -A --field-selector "spec.nodeName=$node" -o json | jq_ '
     .items[]
     | select([.metadata.ownerReferences[]? | select(.kind == "DaemonSet" or .kind == "Node")] | length == 0)
@@ -158,10 +158,10 @@ show_drain_blockers() {
 }
 
 on_prepare_failed() {
-  err "$1: el preflight del nodo (prepare) falló. El nodo NO se ha drenado ni modificado."
+  err "$1: the node preflight (prepare) failed. The node was NOT drained or modified."
   show_logs "$1" "$2" prepare
   hold_node "$1" "$2"
-  die "Rollout detenido. Corregir la causa (ver docs/runbook.md, 'Falla prepare'), y relanzar: kubectl label node $1 os-upgrade- && $0 upgrade ..."
+  die "Rollout stopped. Fix the cause (see docs/runbook.md, 'prepare fails') and relaunch: kubectl label node $1 os-upgrade- && $0 upgrade ..."
 }
 
 on_drain_stuck() {
@@ -170,24 +170,24 @@ on_drain_stuck() {
   why=$3
   warn "$node: $why"
   show_drain_blockers "$node"
-  choice=$(ask_choice "[e]sperar $DRAIN_TIMEOUT más / [a]bortar: apartar el nodo y hacer uncordon [a]:" a)
+  choice=$(ask_choice "[w]ait $DRAIN_TIMEOUT more / [a]bort: hold the node and uncordon [a]:" a)
   case "$choice" in
-    e|E) return 0 ;;
+    w|W|e|E) return 0 ;;
   esac
-  # Seguro: el contenedor upgrade todavía no ha arrancado, el sistema del nodo está intacto.
+  # Safe: the upgrade container has not started yet, the node's system is untouched.
   hold_node "$node" "$plan"
   mutate k uncordon "$node" >/dev/null
-  die "Rollout detenido: drain abortado en $node (uncordon hecho). Resolver los pods/PDBs que lo bloquean y relanzar."
+  die "Rollout stopped: drain aborted on $node (uncordon done). Resolve the pods/PDBs blocking it and relaunch."
 }
 
 on_job_failed() {
   err "$1: $3"
   node_jobs_json "$1" "$2" | jq_ '.items[] | "  Job " + .metadata.name + ": " + ([.status.conditions[]? | .type + "=" + .status + " " + (.reason // "") + " " + (.message // "")] | join("; "))' || true
   show_logs "$1" "$2" upgrade
-  die "Rollout detenido. $1 sigue cordoneado y con os-upgrade=upgrade. En el nodo: sh /usr/local/sbin/os-upgrade.sh status; ver docs/runbook.md, 'El Job falló después del drain'."
+  die "Rollout stopped. $1 is still cordoned and has os-upgrade=upgrade. On the node: sh /usr/local/sbin/os-upgrade.sh status; see docs/runbook.md, 'The Job failed after the drain'."
 }
 
-# Espera a que el Plan termine en el nodo. Sale del script si algo falla.
+# Waits for the Plan to finish on the node. Exits the script if something fails.
 wait_node() {
   node=$1
   plan=$2
@@ -198,7 +198,7 @@ wait_node() {
   last=""
   while :; do
     if [ "$(node_label "$node" "plan.upgrade.cattle.io/$plan")" = "$hash" ]; then
-      info "$node: Plan $plan completado"
+      info "$node: Plan $plan complete"
       return 0
     fi
     phase_info=$(pod_phase "$(node_pod_json "$node" "$plan")")
@@ -209,58 +209,58 @@ wait_node() {
       case "$phase" in
         none)
           if is_true "$upgrade_started"; then
-            info "$node: sin pod (reinicio en curso o Job nuevo)"
+            info "$node: no pod (reboot in progress or new Job)"
           else
-            info "$node: esperando a que el SUC cree el Job"
+            info "$node: waiting for the SUC to create the Job"
           fi ;;
-        starting) info "$node: arrancando pod" ;;
-        prepare) info "$node: prepare (preflight en el nodo)" ;;
+        starting) info "$node: starting pod" ;;
+        prepare) info "$node: prepare (preflight on the node)" ;;
         drain) info "$node: drain" ;;
-        upgrade) info "$node: upgrade en curso (detalle en el nodo: journalctl -fu os-upgrade-release)" ;;
-        upgrade-ended) info "$node: contenedor upgrade terminado (reboot o fin); esperando" ;;
+        upgrade) info "$node: upgrade in progress (details on the node: journalctl -fu os-upgrade-release)" ;;
+        upgrade-ended) info "$node: upgrade container ended (reboot or finish); waiting" ;;
       esac
       last=$phase
     fi
 
     if [ "$(job_failed "$node" "$plan" "$hash")" -gt 0 ]; then
       if ! is_true "$upgrade_started" && [ "$phase" = prepare-failed ]; then on_prepare_failed "$node" "$plan"; fi
-      on_job_failed "$node" "$plan" "el Job del Plan $plan ha fallado"
+      on_job_failed "$node" "$plan" "the Job of Plan $plan has failed"
     fi
     case "$phase" in
       prepare-failed)
         if is_true "$upgrade_started"; then
-          on_job_failed "$node" "$plan" "prepare falló después de empezar el upgrade"
+          on_job_failed "$node" "$plan" "prepare failed after the upgrade had started"
         fi
         on_prepare_failed "$node" "$plan" ;;
       prepare)
         if ! is_true "$upgrade_started" && [ $(( $(now) - phase_start )) -gt "$PREPARE_TIMEOUT_S" ]; then
-          warn "$node: prepare lleva más de $PREPARE_TIMEOUT"
+          warn "$node: prepare has been running for more than $PREPARE_TIMEOUT"
           on_prepare_failed "$node" "$plan"
         fi ;;
       drain-failed)
-        is_true "$upgrade_started" || on_drain_stuck "$node" "$plan" "el contenedor drain falló" ;;
+        is_true "$upgrade_started" || on_drain_stuck "$node" "$plan" "the drain container failed" ;;
       drain)
         if ! is_true "$upgrade_started" && [ $(( $(now) - phase_start )) -gt $((DRAIN_TIMEOUT_S + drain_extra)) ]; then
-          on_drain_stuck "$node" "$plan" "el drain lleva más de $(( (DRAIN_TIMEOUT_S + drain_extra) / 60 )) min"
+          on_drain_stuck "$node" "$plan" "the drain has been running for more than $(( (DRAIN_TIMEOUT_S + drain_extra) / 60 )) min"
           drain_extra=$((drain_extra + DRAIN_TIMEOUT_S))
         fi ;;
     esac
     if [ $(( $(now) - started )) -gt "$NODE_TIMEOUT_S" ]; then
-      on_job_failed "$node" "$plan" "más de $NODE_TIMEOUT sin terminar"
+      on_job_failed "$node" "$plan" "not finished after $NODE_TIMEOUT"
     fi
     sleep "$POLL_SECONDS"
   done
 }
 
-# Verificaciones tras el upgrade; reintenta hasta SETTLE_TIMEOUT (DaemonSets y pods tardan en
-# estabilizarse tras el reboot).
+# Checks after the upgrade; retries until SETTLE_TIMEOUT (DaemonSets and pods take a while
+# to settle after the reboot).
 verify_node() {
   node=$1
   plan=$2
   hash=$3
   kernel=$4
   deadline=$(( $(now) + SETTLE_TIMEOUT_S ))
-  info "Verificando $node"
+  info "Verifying $node"
   while :; do
     if out=$(
       check_node_upgraded "$node" "$kernel" "$plan" "$hash" "$TARGET" \
@@ -273,17 +273,17 @@ verify_node() {
     fi
     if [ "$(now)" -ge "$deadline" ]; then
       echo "$out"
-      die "Rollout detenido: $node no pasa la verificación tras $SETTLE_TIMEOUT. Revisar antes de seguir; el nodo queda con os-upgrade=upgrade."
+      die "Rollout stopped: $node does not pass verification after $SETTLE_TIMEOUT. Review it before continuing; the node keeps os-upgrade=upgrade."
     fi
     sleep "$POLL_SECONDS"
   done
   if ! is_true "$SKIP_NET_TEST"; then
     check_node_dns "$node" "$(plan_image)" \
-      || die "Rollout detenido: la prueba de DNS/red falló en $node."
+      || die "Rollout stopped: the DNS/network test failed on $node."
   fi
 }
 
-# Mueve el liderazgo de etcd fuera del nodo, preferiblemente a un miembro ya actualizado.
+# Moves etcd leadership off the node, preferably to an already upgraded member.
 move_leader_off() {
   node=$1
   status=$(etcd_status "$node")
@@ -301,25 +301,25 @@ move_leader_off() {
     if [ -z "$target_id" ]; then target_id=$id; target_node=$n; fi
   done
   if [ -z "$leader_ep" ] || [ -z "$target_id" ]; then
-    die "no se pudo elegir un miembro de etcd al que mover el liderazgo"
+    die "could not pick an etcd member to move the leadership to"
   fi
-  info "$node es el líder de etcd: move-leader a $target_node ($target_id)"
+  info "$node is the etcd leader: move-leader to $target_node ($target_id)"
   mutate etcd_ctl "$node" --endpoints="$leader_ep" move-leader "$target_id" >/dev/null \
-    || die "move-leader falló"
+    || die "move-leader failed"
   is_true "$DRY_RUN" && return 0
   i=0
   while [ $i -lt 10 ]; do
     if [ "$(etcd_leader_node "$node" || true)" = "$target_node" ]; then
-      info "Nuevo líder de etcd: $target_node"
+      info "New etcd leader: $target_node"
       return 0
     fi
     i=$((i + 1))
     sleep "$RETRY_SLEEP"
   done
-  die "el liderazgo de etcd no se movió a $target_node"
+  die "etcd leadership did not move to $target_node"
 }
 
-# Avisa si hay PDBs bloqueados en los namespaces que tienen pods en el nodo.
+# Warns about blocked PDBs in the namespaces that have pods on the node.
 warn_pdbs_for_node() {
   node=$1
   nss=$(k get pods -A --field-selector "spec.nodeName=$node" -o json \
@@ -331,9 +331,9 @@ warn_pdbs_for_node() {
     case " $(echo "$nss" | tr '\n' ' ') " in *" ${b%%/*} "*) hit="$hit $b" ;; esac
   done
   [ -n "$hit" ] || return 0
-  warn "$node: PDBs sin interrupciones permitidas en namespaces con pods en el nodo:$hit (el drain puede bloquearse)"
-  confirm "¿Lanzar $node igualmente? (el drain tiene timeout de $DRAIN_TIMEOUT)" \
-    || die "Rollout detenido antes de $node por los PDBs."
+  warn "$node: PDBs with no disruptions allowed in namespaces with pods on the node:$hit (the drain may block)"
+  confirm "Launch $node anyway? (the drain has a $DRAIN_TIMEOUT timeout)" \
+    || die "Rollout stopped before $node because of the PDBs."
 }
 
 has_control_plane() {
@@ -347,19 +347,19 @@ upgrade_one() {
   kernel=$4
   plan=$(plan_for_node "$node")
   hash=$(plan_hash "$plan")
-  [ -n "$hash" ] || die "el Plan $plan no tiene latestHash; ¿está aplicado?"
+  [ -n "$hash" ] || die "Plan $plan has no latestHash; is it applied?"
   echo
   info "=== [$idx/$total] $node ($plan)"
 
   if [ "$(node_label "$node" "plan.upgrade.cattle.io/$plan")" = "$hash" ]; then
-    info "$node: el Plan ya figura como terminado; solo se verifica"
+    info "$node: the Plan is already marked as complete; only verifying"
   elif [ "$(node_label "$node" os-upgrade)" = upgrade ]; then
-    info "$node: ya estaba en curso; se retoma el seguimiento"
-    check_os_upgrade_idle "$node" >/dev/null || die "hay otros nodos en upgrade a la vez que $node"
+    info "$node: already in progress; resuming"
+    check_os_upgrade_idle "$node" >/dev/null || die "other nodes are being upgraded at the same time as $node"
   else
-    check_nodes_ready || die "Rollout detenido: hay nodos no Ready."
-    check_os_upgrade_idle || die "Rollout detenido: hay otro nodo en upgrade."
-    if has_control_plane; then check_etcd "$node" || die "Rollout detenido: etcd no está sano."; fi
+    check_nodes_ready || die "Rollout stopped: there are nodes not Ready."
+    check_os_upgrade_idle || die "Rollout stopped: another node is being upgraded."
+    if has_control_plane; then check_etcd "$node" || die "Rollout stopped: etcd is not healthy."; fi
     warn_pdbs_for_node "$node"
     if [ "$plan" = "$PLAN_CP" ] && [ "$(etcd_leader_node "$node" || true)" = "$node" ]; then
       move_leader_off "$node"
@@ -369,7 +369,7 @@ upgrade_one() {
   fi
 
   if is_true "$DRY_RUN"; then
-    echo "$(ts) [dry-run] esperar Plan $plan, verificar y: kubectl label node $node os-upgrade=done --overwrite"
+    echo "$(ts) [dry-run] wait for Plan $plan, verify and: kubectl label node $node os-upgrade=done --overwrite"
     return 0
   fi
   wait_node "$node" "$plan" "$hash"
@@ -378,15 +378,15 @@ upgrade_one() {
   info "$node: OK, os-upgrade=done"
 }
 
-# ------------------------------------------------------------------ modos
+# ------------------------------------------------------------------ modes
 cmd_upgrade() {
   candidates=$(selected_nodes)
-  [ -n "$candidates" ] || die "ningún nodo seleccionado"
+  [ -n "$candidates" ] || die "no node selected"
   resume="" workers="" cps=""
   for n in $candidates; do
     state=$(node_label "$n" os-upgrade)
     case "$state" in
-      done|hold) info "se omite $n (os-upgrade=$state)"; continue ;;
+      done|hold) info "skipping $n (os-upgrade=$state)"; continue ;;
       upgrade) resume="$resume $n"; continue ;;
     esac
     if node_is_cp "$n"; then cps="$cps $n"; else workers="$workers $n"; fi
@@ -395,7 +395,7 @@ cmd_upgrade() {
   leader=""
   if [ -n "$cps" ]; then
     leader=$(etcd_leader_node || true)
-    [ -n "$leader" ] || is_true "$DRY_RUN" || die "no se pudo determinar el líder de etcd"
+    [ -n "$leader" ] || is_true "$DRY_RUN" || die "could not determine the etcd leader"
   fi
   others="" last=""
   for n in $cps; do
@@ -403,49 +403,49 @@ cmd_upgrade() {
   done
   # shellcheck disable=SC2086
   set -- $resume $workers $others $last
-  [ $# -gt 0 ] || { info "Nada que hacer: todos los nodos seleccionados están en done/hold."; return 0; }
+  [ $# -gt 0 ] || { info "Nothing to do: all selected nodes are done/hold."; return 0; }
   total=$#
 
   kernel=$(config_value KERNEL_VERSION || true)
   TARGET=$(target_version)
-  echo "Rollout en el contexto '$(k config current-context 2>/dev/null)', Ubuntu $TARGET con kernel ${kernel:-?}:"
+  echo "Rollout in context '$(k config current-context 2>/dev/null)', Ubuntu $TARGET with kernel ${kernel:-?}:"
   i=1
   for n in "$@"; do
     note=""
-    case " $resume " in *" $n "*) note=" [en curso: se retoma]" ;; esac
-    [ "$n" = "$last" ] && note=" [líder de etcd: move-leader antes]"
+    case " $resume " in *" $n "*) note=" [in progress: resumed]" ;; esac
+    [ "$n" = "$last" ] && note=" [etcd leader: move-leader first]"
     printf '  %d. %-30s %s%s\n' "$i" "$n" "$(plan_for_node "$n")" "$note"
     i=$((i + 1))
   done
   echo
 
-  check_api || die "sin acceso al cluster"
-  check_suc || die "Rollout detenido."
-  check_plans || die "Rollout detenido."
-  check_rancher_plans_idle || die "Rollout detenido."
-  check_snapshot || die "Rollout detenido."
-  [ -n "$kernel" ] || die "KERNEL_VERSION no definido"
+  check_api || die "no access to the cluster"
+  check_suc || die "Rollout stopped."
+  check_plans || die "Rollout stopped."
+  check_rancher_plans_idle || die "Rollout stopped."
+  check_snapshot || die "Rollout stopped."
+  [ -n "$kernel" ] || die "KERNEL_VERSION not set"
 
   if ! is_true "$DRY_RUN"; then
-    confirm "¿Empezar el rollout de $total nodo(s)?" || die "Cancelado."
+    confirm "Start the rollout of $total node(s)?" || die "Cancelled."
   fi
   i=1
   for n in "$@"; do
     upgrade_one "$n" "$i" "$total" "$kernel"
     if [ "$i" -lt "$total" ] && ! is_true "$DRY_RUN"; then
       eval "next=\${$((i + 1))}"
-      # shellcheck disable=SC2154 # next se asigna con eval
-      if ! confirm "$n terminado y verificado. ¿Continuar con $next?"; then
-        info "Rollout detenido por el operador después de $n. Para seguir, relanzar el mismo comando."
+      # shellcheck disable=SC2154 # next is assigned with eval
+      if ! confirm "$n finished and verified. Continue with $next?"; then
+        info "Rollout stopped by the operator after $n. To continue, relaunch the same command."
         return 0
       fi
     fi
     i=$((i + 1))
   done
   echo
-  info "Rollout completado: $total nodo(s)."
+  info "Rollout complete: $total node(s)."
   if [ -z "$GROUP" ]; then return 0; fi
-  sh "$(dirname "$0")/check-cluster.sh" >/dev/null 2>&1 || warn "check-cluster.sh reporta problemas; revisarlo"
+  sh "$(dirname "$0")/check-cluster.sh" >/dev/null 2>&1 || warn "check-cluster.sh reports problems; review it"
 }
 
 cmd_predownload() {
@@ -454,15 +454,15 @@ cmd_predownload() {
   for n in $candidates; do
     state=$(node_label "$n" os-upgrade)
     case "$state" in
-      done|hold|upgrade) info "se omite $n (os-upgrade=$state)" ;;
+      done|hold|upgrade) info "skipping $n (os-upgrade=$state)" ;;
       *) nodes="$nodes $n" ;;
     esac
   done
-  [ -n "$nodes" ] || { info "Ningún nodo para pre-descargar."; return 0; }
-  check_api || die "sin acceso al cluster"
-  check_plans || die "Detenido."
-  echo "Pre-descarga en:$nodes"
-  is_true "$DRY_RUN" || confirm "¿Lanzar la pre-descarga?" || die "Cancelado."
+  [ -n "$nodes" ] || { info "No node to predownload."; return 0; }
+  check_api || die "no access to the cluster"
+  check_plans || die "Stopped."
+  echo "Predownload on:$nodes"
+  is_true "$DRY_RUN" || confirm "Launch the predownload?" || die "Cancelled."
   for n in $nodes; do
     mutate k label node "$n" os-upgrade=predownload --overwrite >/dev/null
   done
@@ -479,14 +479,14 @@ cmd_predownload() {
       phase=$(pod_phase "$(node_pod_json "$n" "$PLAN_PREDOWNLOAD")")
       case " $started_dl " in
         *" $n "*) ;;
-        *) if [ "${phase% *}" = upgrade ]; then info "$n: descargando"; started_dl="$started_dl $n"; fi ;;
+        *) if [ "${phase% *}" = upgrade ]; then info "$n: downloading"; started_dl="$started_dl $n"; fi ;;
       esac
       if [ "$(node_label "$n" "plan.upgrade.cattle.io/$PLAN_PREDOWNLOAD")" = "$hash" ]; then
-        info "$n: pre-descarga terminada"
+        info "$n: predownload finished"
         k -n "$NS" logs -l "upgrade.cattle.io/plan=$PLAN_PREDOWNLOAD,upgrade.cattle.io/node=$n" -c upgrade --tail=50 2>/dev/null \
-          | grep -E 'WARN|Pre-descarga OK' | sed 's/^/    /' || true
+          | grep -E 'WARN|Predownload OK' | sed 's/^/    /' || true
       elif [ "$(job_failed "$n" "$PLAN_PREDOWNLOAD" "$hash")" -gt 0 ]; then
-        err "$n: la pre-descarga falló"
+        err "$n: the predownload failed"
         show_logs "$n" "$PLAN_PREDOWNLOAD" upgrade
         failed="$failed $n"
       else
@@ -495,22 +495,22 @@ cmd_predownload() {
     done
     pending=$still
     [ -n "$(echo "$pending" | tr -d ' ')" ] || break
-    [ "$(now)" -lt "$deadline" ] || die "pre-descarga sin terminar tras $PREDOWNLOAD_TIMEOUT en:$pending"
+    [ "$(now)" -lt "$deadline" ] || die "predownload not finished after $PREDOWNLOAD_TIMEOUT on:$pending"
     sleep "$POLL_SECONDS"
   done
-  [ -z "$failed" ] || die "pre-descarga fallida en:$failed"
-  info "Pre-descarga completada."
+  [ -z "$failed" ] || die "predownload failed on:$failed"
+  info "Predownload complete."
 }
 
-# Estado real de cada nodo:
-#   UPGRADE      ok (versión destino con el KERNEL_VERSION actual) | en curso (os-upgrade=upgrade) | no
-#   PREDESCARGA  ok (versión actual del Plan) | anterior (otra versión) | no | - (ya actualizado)
+# Actual state of each node:
+#   UPGRADE      ok (target version with the current KERNEL_VERSION) | in progress (os-upgrade=upgrade) | no
+#   PREDOWNLOAD  ok (current Plan version) | previous (another version) | no | - (already upgraded)
 cmd_status() {
   hp=$(plan_hash "$PLAN_PREDOWNLOAD" 2>/dev/null || true)
   kernel=$(config_value KERNEL_VERSION 2>/dev/null || true)
   TARGET=$(target_version)
   wanted=" $(selected_nodes | tr '\n' ' ') "
-  printf '%-28s %-6s %-6s %-12s %-11s %-8s %-20s %-24s %s\n' NODO ROL GRUPO OS-UPGRADE PREDESCARGA UPGRADE SO KERNEL ESTADO
+  printf '%-28s %-6s %-6s %-12s %-11s %-11s %-20s %-24s %s\n' NODE ROLE GROUP OS-UPGRADE PREDOWNLOAD UPGRADE OS KERNEL STATE
   nodes_json | jq_ "
     .items[] | [
       .metadata.name,
@@ -531,13 +531,13 @@ cmd_status() {
         *"$TARGET"*) [ -n "$kernel" ] && [ "$kv" = "$kernel" ] && ud="ok" || ud="no" ;;
         *) ud="no" ;;
       esac
-      [ "$ud" = ok ] || [ "$state" != upgrade ] || ud="en curso"
+      [ "$ud" = ok ] || [ "$state" != upgrade ] || ud="in progress"
       if [ "$ud" = ok ]; then pd="-"
       elif [ "$ph" = "-" ]; then pd="no"
       elif [ "$ph" = "$hp" ]; then pd="ok"
-      else pd="anterior"
+      else pd="previous"
       fi
-      printf '%-28s %-6s %-6s %-12s %-11s %-8s %-20s %-24s %s\n' "$name" "$role" "$group" "$state" "$pd" "$ud" "$os" "$kv" "$ready${cordon:+,$cordon}"
+      printf '%-28s %-6s %-6s %-12s %-11s %-11s %-20s %-24s %s\n' "$name" "$role" "$group" "$state" "$pd" "$ud" "$os" "$kv" "$ready${cordon:+,$cordon}"
     done
 }
 
@@ -548,5 +548,5 @@ case "$MODE" in
   predownload) cmd_predownload ;;
   status) cmd_status ;;
   -h|--help) usage ;;
-  *) err "modo desconocido: $MODE"; usage ;;
+  *) err "unknown mode: $MODE"; usage ;;
 esac

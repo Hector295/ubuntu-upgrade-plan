@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# rollout.sh contra un cluster falso (tests/k8s-stubs/kubectl).
+# rollout.sh against a fake cluster (tests/k8s-stubs/kubectl).
 
 load k8s_helpers
 
@@ -7,22 +7,22 @@ setup() {
   setup_cluster
 }
 
-@test "rollout: sin --group ni --nodes falla" {
+@test "rollout: fails without --group or --nodes" {
   run sh "$ROLLOUT" upgrade --yes
   [ "$status" -eq 1 ]
-  [[ "$output" == *"indicar --group G o --nodes"* ]]
+  [[ "$output" == *"specify --group G or --nodes"* ]]
 }
 
-@test "rollout: duración inválida falla" {
+@test "rollout: invalid duration fails" {
   run sh "$ROLLOUT" upgrade --nodes w1 --drain-timeout 5x
   [ "$status" -ne 0 ]
-  [[ "$output" == *"duración inválida en --drain-timeout"* ]]
+  [[ "$output" == *"invalid duration in --drain-timeout"* ]]
 }
 
-@test "rollout --dry-run: orden workers -> cp no líderes -> líder, sin cambiar nada" {
+@test "rollout --dry-run: order workers -> non-leader cps -> leader, changing nothing" {
   run sh "$ROLLOUT" upgrade --nodes cp1,cp2,w1 --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *"1. w1"*"2. cp2"*"3. cp1"*"líder de etcd: move-leader antes"* ]]
+  [[ "$output" == *"1. w1"*"2. cp2"*"3. cp1"*"etcd leader: move-leader first"* ]]
   [[ "$output" == *"[dry-run] kubectl label node w1 os-upgrade=upgrade --overwrite"* ]]
   [[ "$output" == *"[dry-run] etcd_ctl cp1 --endpoints=https://10.0.0.1:2379 move-leader"* ]]
   not_called "label node"
@@ -31,98 +31,109 @@ setup() {
   not_called "delete"
 }
 
-@test "rollout: worker completo con --yes queda en done" {
+@test "rollout: complete worker with --yes ends up done" {
   scenario_success w1 os-upgrade-workers "$H_W"
   run sh "$ROLLOUT" upgrade --nodes w1 --yes
   [ "$status" -eq 0 ]
-  [[ "$output" == *"w1: prepare"*"w1: drain"*"w1: upgrade en curso"*"w1: Plan os-upgrade-workers completado"* ]]
+  [[ "$output" == *"w1: prepare"*"w1: drain"*"w1: upgrade in progress"*"w1: Plan os-upgrade-workers complete"* ]]
   [[ "$output" == *"[OK]    w1: Ubuntu 24.04.3 LTS, kernel $TARGET_KERNEL"* ]]
-  [[ "$output" == *"DNS y red del clúster funcionan"* ]]
+  [[ "$output" == *"cluster DNS and network work"* ]]
   [ "$(label_of w1 os-upgrade)" = done ]
   called "label node w1 os-upgrade=upgrade --overwrite"
 }
 
-@test "rollout: grupo de workers pide confirmación entre nodos y respeta el 'no'" {
+@test "rollout: a worker group asks for confirmation between nodes and honours 'no'" {
   scenario_success w1 os-upgrade-workers "$H_W"
   scenario_success w2 os-upgrade-workers "$H_W"
-  answers s n
+  answers y n
   run sh "$ROLLOUT" upgrade --group 1
   [ "$status" -eq 0 ]
-  [[ "$output" == *"w1 terminado y verificado. ¿Continuar con w2?"* ]]
-  [[ "$output" == *"Rollout detenido por el operador después de w1"* ]]
+  [[ "$output" == *"Start the rollout of 2 node(s)? [y/N]"* ]]
+  [[ "$output" == *"w1 finished and verified. Continue with w2?"* ]]
+  [[ "$output" == *"Rollout stopped by the operator after w1"* ]]
   [ "$(label_of w1 os-upgrade)" = done ]
   [ "$(label_of w2 os-upgrade)" = "" ]
 }
 
-@test "rollout: sin confirmación inicial no toca nada" {
+@test "rollout: the old Spanish answer 's' is still accepted" {
+  scenario_success w1 os-upgrade-workers "$H_W"
+  answers s
+  run sh "$ROLLOUT" upgrade --nodes w1
+  [ "$status" -eq 0 ]
+  [ "$(label_of w1 os-upgrade)" = done ]
+}
+
+@test "rollout: without the initial confirmation nothing is touched" {
   answers n
   run sh "$ROLLOUT" upgrade --nodes w1
   [ "$status" -eq 1 ]
   not_called "label node"
 }
 
-@test "rollout: líder de etcd -> move-leader a un miembro ya actualizado antes de etiquetarlo" {
+@test "rollout: etcd leader -> move-leader to an upgraded member before labeling it" {
   scenario_success cp2 os-upgrade-cp "$H_CP"
   scenario_success cp1 os-upgrade-cp "$H_CP"
   run sh "$ROLLOUT" upgrade --nodes cp1,cp2 --yes
   [ "$status" -eq 0 ]
-  # cp2 primero; cp1 (líder) al final, con move-leader a cp2 (ya en 24.04).
+  # cp2 first; cp1 (leader) last, with move-leader to cp2 (already on 24.04).
   [ "$(line_of 'label node cp2 os-upgrade=upgrade')" -lt "$(line_of 'move-leader')" ]
   [ "$(line_of 'move-leader aaaa000000000002')" -lt "$(line_of 'label node cp1 os-upgrade=upgrade')" ]
-  [[ "$output" == *"Nuevo líder de etcd: cp2"* ]]
+  [[ "$output" == *"New etcd leader: cp2"* ]]
   [ "$(label_of cp1 os-upgrade)" = done ]
   [ "$(label_of cp2 os-upgrade)" = done ]
 }
 
-@test "rollout: prepare fallido -> nodo apartado, sin drenar ni uncordon" {
+@test "rollout: failed prepare -> node held, not drained, no uncordon" {
   frame os-upgrade-workers w1 1 running "" "" active
   frame os-upgrade-workers w1 2 fail "" "" active
-  echo "ERROR falta la pre-descarga" > "$K8S/logs.prepare.txt"
+  echo "ERROR predownload missing" > "$K8S/logs.prepare.txt"
   run sh "$ROLLOUT" upgrade --nodes w1 --yes
   [ "$status" -eq 1 ]
-  [[ "$output" == *"El nodo NO se ha drenado"* ]]
-  [[ "$output" == *"falta la pre-descarga"* ]]
+  [[ "$output" == *"The node was NOT drained or modified"* ]]
+  [[ "$output" == *"predownload missing"* ]]
+  [[ "$output" == *"see docs/runbook.md, 'prepare fails'"* ]]
   [ "$(label_of w1 os-upgrade)" = hold ]
   called "delete job -l upgrade.cattle.io/plan=os-upgrade-workers,upgrade.cattle.io/node=w1"
   not_called "uncordon"
 }
 
-@test "rollout: drain que supera el timeout con --yes -> aborta, aparta y hace uncordon" {
+@test "rollout: drain over the timeout with --yes -> abort, hold and uncordon" {
   frame os-upgrade-workers w1 1 ok "running@2026-01-01T00:00:00Z" "" active '.spec.unschedulable = true'
   run sh "$ROLLOUT" upgrade --nodes w1 --yes --drain-timeout 10m
   [ "$status" -eq 1 ]
-  [[ "$output" == *"el drain lleva más de 10 min"* ]]
-  [[ "$output" == *"drain abortado en w1 (uncordon hecho)"* ]]
+  [[ "$output" == *"the drain has been running for more than 10 min"* ]]
+  [[ "$output" == *"drain aborted on w1 (uncordon done)"* ]]
   [ "$(label_of w1 os-upgrade)" = hold ]
   called "uncordon w1"
 }
 
-@test "rollout: drain lento -> el operador decide esperar y el nodo termina" {
+@test "rollout: slow drain -> the operator chooses to wait and the node finishes" {
   frame os-upgrade-workers w1 1 ok "running@2026-01-01T00:00:00Z" "" active
   frame os-upgrade-workers w1 2 ok ok running active
   frame os-upgrade-workers w1 3 ok ok ok complete "$(upgraded_expr os-upgrade-workers "$H_W")"
-  answers s e
+  answers y w
   run sh "$ROLLOUT" upgrade --nodes w1 --drain-timeout 10m
   [ "$status" -eq 0 ]
-  [[ "$output" == *"[e]sperar 10m más"* ]]
+  [[ "$output" == *"[w]ait 10m more"* ]]
   not_called "uncordon"
   [ "$(label_of w1 os-upgrade)" = done ]
 }
 
-@test "rollout: Job fallido tras empezar el upgrade -> para y deja el nodo como está" {
+@test "rollout: Job failed after the upgrade started -> stop and leave the node as is" {
   frame os-upgrade-workers w1 1 ok ok running active '.spec.unschedulable = true'
   frame os-upgrade-workers w1 2 ok ok fail failed
   run sh "$ROLLOUT" upgrade --nodes w1 --yes
   [ "$status" -eq 1 ]
-  [[ "$output" == *"el Job del Plan os-upgrade-workers ha fallado"* ]]
+  [[ "$output" == *"the Job of Plan os-upgrade-workers has failed"* ]]
   [[ "$output" == *"BackoffLimitExceeded"* ]]
-  [[ "$output" == *"sigue cordoneado y con os-upgrade=upgrade"* ]]
+  [[ "$output" == *"is still cordoned and has os-upgrade=upgrade"* ]]
+  [[ "$output" == *"see docs/runbook.md, 'The Job failed after the drain'"* ]]
   [ "$(label_of w1 os-upgrade)" = upgrade ]
   not_called "uncordon"
   not_called "delete job"
 }
 
-@test "rollout: los pods del Job del SUC en Failed (muertos por el reboot) no cuentan como problema" {
+@test "rollout: Failed SUC Job pods (killed by the reboot) do not count as a problem" {
   scenario_success w1 os-upgrade-workers "$H_W"
   cat > "$K8S/nodepods/w1.json" <<'EOF2'
 {"items":[
@@ -132,35 +143,36 @@ setup() {
 EOF2
   run sh "$ROLLOUT" upgrade --nodes w1 --yes
   [ "$status" -eq 0 ]
-  [[ "$output" == *"[OK]    w1: todos sus pods en marcha"* ]]
+  [[ "$output" == *"[OK]    w1: all its pods running"* ]]
 }
 
-@test "rollout: un pod de aplicación en CrashLoopBackOff sí bloquea la verificación" {
+@test "rollout: an application pod in CrashLoopBackOff does block verification" {
   scenario_success w1 os-upgrade-workers "$H_W"
   echo '{"items":[{"metadata":{"namespace":"app","name":"web-1"},"status":{"phase":"Running","containerStatuses":[{"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}}]}' > "$K8S/nodepods/w1.json"
   SETTLE_TIMEOUT=0s run sh "$ROLLOUT" upgrade --nodes w1 --yes
   [ "$status" -eq 1 ]
-  [[ "$output" == *"w1: pods con problemas: app/web-1"* ]]
+  [[ "$output" == *"[FAIL]  w1: pods with problems: app/web-1"* ]]
 }
 
-@test "rollout: verificación fallida (kernel distinto) no marca done" {
+@test "rollout: failed verification (different kernel) does not mark done" {
   frame os-upgrade-workers w1 1 ok ok ok complete "$(upgraded_expr os-upgrade-workers "$H_W" 6.8.0-147-generic)"
   SETTLE_TIMEOUT=0s run sh "$ROLLOUT" upgrade --nodes w1 --yes
   [ "$status" -eq 1 ]
-  [[ "$output" == *"kernel '6.8.0-147-generic' (esperado $TARGET_KERNEL)"* ]]
+  [[ "$output" == *"kernel '6.8.0-147-generic' (expected $TARGET_KERNEL)"* ]]
+  [[ "$output" == *"does not pass verification after 0s"* ]]
   [ "$(label_of w1 os-upgrade)" = upgrade ]
 }
 
-@test "rollout: prueba de DNS fallida no marca done" {
+@test "rollout: failed DNS test does not mark done" {
   scenario_success w1 os-upgrade-workers "$H_W"
   touch "$K8S/nettest-fail"
   run sh "$ROLLOUT" upgrade --nodes w1 --yes
   [ "$status" -eq 1 ]
-  [[ "$output" == *"la prueba de DNS/red falló en w1"* ]]
+  [[ "$output" == *"the DNS/network test failed on w1"* ]]
   [ "$(label_of w1 os-upgrade)" = upgrade ]
 }
 
-@test "rollout: --skip-net-test omite la prueba de DNS" {
+@test "rollout: --skip-net-test skips the DNS test" {
   scenario_success w1 os-upgrade-workers "$H_W"
   touch "$K8S/nettest-fail"
   run sh "$ROLLOUT" upgrade --nodes w1 --yes --skip-net-test
@@ -168,72 +180,73 @@ EOF2
   not_called " run "
 }
 
-@test "rollout: etcd no sano -> no se etiqueta el nodo" {
+@test "rollout: unhealthy etcd -> the node is not labeled" {
   set_etcd 3 6 false
   run sh "$ROLLOUT" upgrade --nodes w1 --yes
   [ "$status" -eq 1 ]
-  [[ "$output" == *"etcd no está sano"* ]]
+  [[ "$output" == *"etcd is not healthy"* ]]
   not_called "label node"
 }
 
-@test "rollout: Plan de Rancher en curso -> no empieza" {
+@test "rollout: Rancher Plan in progress -> does not start" {
   set_applying system-agent-upgrader-x cp1
   run sh "$ROLLOUT" upgrade --nodes w1 --yes
   [ "$status" -eq 1 ]
-  [[ "$output" == *"hay Plans de Rancher aplicándose"* ]]
+  [[ "$output" == *"Rancher Plans are being applied"* ]]
   not_called "label node"
 }
 
-@test "rollout: snapshot de etcd antiguo -> no empieza" {
+@test "rollout: old etcd snapshot -> does not start" {
   snapshot_age_hours 48
   run sh "$ROLLOUT" upgrade --nodes w1 --yes
   [ "$status" -eq 1 ]
-  [[ "$output" == *"el último snapshot de etcd tiene 48 h"* ]]
+  [[ "$output" == *"the latest etcd snapshot is 48 h old"* ]]
   not_called "label node"
 }
 
-@test "rollout: otro nodo en upgrade -> no empieza el siguiente" {
+@test "rollout: another node upgrading -> the next one does not start" {
   set_applying os-upgrade-cp cp3
   run sh "$ROLLOUT" upgrade --nodes w1 --yes
   [ "$status" -eq 1 ]
-  [[ "$output" == *"hay otros nodos actualizándose: os-upgrade-cp:cp3"* ]]
+  [[ "$output" == *"other nodes are being upgraded: os-upgrade-cp:cp3"* ]]
   not_called "label node"
 }
 
-@test "rollout: nodos done y hold se omiten" {
+@test "rollout: done and hold nodes are skipped" {
   set_label w1 os-upgrade done
   set_label w2 os-upgrade hold
   run sh "$ROLLOUT" upgrade --group 1 --yes
   [ "$status" -eq 0 ]
-  [[ "$output" == *"se omite w1 (os-upgrade=done)"* ]]
-  [[ "$output" == *"se omite w2 (os-upgrade=hold)"* ]]
-  [[ "$output" == *"Nada que hacer"* ]]
+  [[ "$output" == *"skipping w1 (os-upgrade=done)"* ]]
+  [[ "$output" == *"skipping w2 (os-upgrade=hold)"* ]]
+  [[ "$output" == *"Nothing to do"* ]]
   not_called "label node"
 }
 
-@test "rollout: retoma un nodo que ya estaba en curso sin volver a etiquetarlo" {
+@test "rollout: resumes a node already in progress without relabeling it" {
   set_label w1 os-upgrade upgrade
   set_applying os-upgrade-workers w1
   frame os-upgrade-workers w1 1 ok ok running active
   frame os-upgrade-workers w1 2 ok ok ok complete "$(upgraded_expr os-upgrade-workers "$H_W")"
   run sh "$ROLLOUT" upgrade --nodes w1 --yes
   [ "$status" -eq 0 ]
-  [[ "$output" == *"en curso: se retoma"* ]]
+  [[ "$output" == *"in progress: resumed"* ]]
   not_called "label node w1 os-upgrade=upgrade"
   [ "$(label_of w1 os-upgrade)" = done ]
 }
 
-@test "rollout: PDB bloqueado en el namespace de un pod del nodo pide confirmación" {
+@test "rollout: a blocked PDB in the namespace of a pod on the node asks for confirmation" {
   echo '{"items":[{"metadata":{"namespace":"app","name":"web"},"status":{"disruptionsAllowed":0}}]}' > "$K8S/pdb.json"
   echo '{"items":[{"metadata":{"namespace":"app","name":"web-1","ownerReferences":[{"kind":"ReplicaSet"}]},"status":{"phase":"Running"}}]}' > "$K8S/nodepods/w1.json"
-  answers s n
+  answers y n
   run sh "$ROLLOUT" upgrade --nodes w1
   [ "$status" -eq 1 ]
-  [[ "$output" == *"PDBs sin interrupciones permitidas"*"app/web"* ]]
+  [[ "$output" == *"PDBs with no disruptions allowed"*"app/web"* ]]
+  [[ "$output" == *"Rollout stopped before w1 because of the PDBs."* ]]
   not_called "label node"
 }
 
-@test "predownload: etiqueta solo los nodos elegibles" {
+@test "predownload: labels only the eligible nodes" {
   set_label w2 os-upgrade done
   set_label cp1 os-upgrade upgrade
   run sh "$ROLLOUT" predownload --nodes w1,w2,cp1 --yes
@@ -241,71 +254,72 @@ EOF2
   called "label node w1 os-upgrade=predownload"
   not_called "label node w2"
   not_called "label node cp1"
-  [[ "$output" == *"se omite w2 (os-upgrade=done)"* ]]
+  [[ "$output" == *"skipping w2 (os-upgrade=done)"* ]]
 }
 
-@test "predownload --wait: informa del resultado y de los avisos de cada nodo" {
+@test "predownload --wait: reports each node's result and warnings" {
   frame os-upgrade-predownload w1 1 "" "" running active
   frame os-upgrade-predownload w1 2 "" "" ok complete ".metadata.labels[\"plan.upgrade.cattle.io/os-upgrade-predownload\"] = \"$H_PRE\""
-  printf 'INFO Pre-descarga OK: 700 paquetes\nWARN este nodo necesitará parche + reboot previo\n' > "$K8S/logs.upgrade.txt"
+  printf 'INFO Predownload OK: 700 packages\nWARN this node will need a patch + prior reboot\nINFO something else\n' > "$K8S/logs.upgrade.txt"
   run sh "$ROLLOUT" predownload --nodes w1 --yes --wait
   [ "$status" -eq 0 ]
-  [[ "$output" == *"w1: descargando"*"w1: pre-descarga terminada"* ]]
-  [[ "$output" == *"Pre-descarga OK: 700 paquetes"* ]]
-  [[ "$output" == *"WARN este nodo necesitará parche + reboot previo"* ]]
-  [[ "$output" == *"Pre-descarga completada."* ]]
+  [[ "$output" == *"w1: downloading"*"w1: predownload finished"* ]]
+  [[ "$output" == *"Predownload OK: 700 packages"* ]]
+  [[ "$output" == *"WARN this node will need a patch + prior reboot"* ]]
+  [[ "$output" != *"something else"* ]]
+  [[ "$output" == *"Predownload complete."* ]]
 }
 
-@test "predownload --wait: un Job fallido hace fallar el comando" {
+@test "predownload --wait: a failed Job makes the command fail" {
   frame os-upgrade-predownload w1 1 "" "" fail failed
   run sh "$ROLLOUT" predownload --nodes w1 --yes --wait
   [ "$status" -eq 1 ]
-  [[ "$output" == *"w1: la pre-descarga falló"* ]]
+  [[ "$output" == *"w1: the predownload failed"* ]]
 }
 
-@test "status: estado real de cada nodo, no el hash de la versión de los Plans" {
-  # w1: actualizado en una campaña anterior (hash antiguo) -> ok.
+@test "status: actual state of each node, not the Plan version hash" {
+  # w1: upgraded in a previous campaign (old hash) -> ok.
   set_label w1 os-upgrade done
-  set_label w1 plan.upgrade.cattle.io/os-upgrade-workers viejo
-  y -i -p json -o json "(.items[] | select(.metadata.name == \"w1\")) |= ($(upgraded_expr os-upgrade-workers viejo))" "$K8S/nodes.json"
-  # w2: en curso, con la pre-descarga de la versión actual.
+  set_label w1 plan.upgrade.cattle.io/os-upgrade-workers old
+  y -i -p json -o json "(.items[] | select(.metadata.name == \"w1\")) |= ($(upgraded_expr os-upgrade-workers old))" "$K8S/nodes.json"
+  # w2: in progress, with the predownload of the current version.
   set_label w2 os-upgrade upgrade
   set_label w2 plan.upgrade.cattle.io/os-upgrade-predownload "$H_PRE"
-  # cp1: pre-descarga de una versión anterior.
-  set_label cp1 plan.upgrade.cattle.io/os-upgrade-predownload viejo
+  # cp1: predownload of a previous version.
+  set_label cp1 plan.upgrade.cattle.io/os-upgrade-predownload old
   run sh "$ROLLOUT" status
   [ "$status" -eq 0 ]
-  [[ "$output" == *"NODO"*"PREDESCARGA"* ]]
+  [[ "$output" == *"NODE"*"PREDOWNLOAD"*"STATE"* ]]
   echo "$output" | grep -Eq '^w1 +worker +1 +done +- +ok +Ubuntu_24.04.3 +6.8.0-139-generic +Ready'
-  echo "$output" | grep -Eq '^w2 +worker +1 +upgrade +ok +en curso '
-  echo "$output" | grep -Eq '^cp1 +cp +3 +- +anterior +no '
+  echo "$output" | grep -Eq '^w2 +worker +1 +upgrade +ok +in progress '
+  echo "$output" | grep -Eq '^cp1 +cp +3 +- +previous +no '
   echo "$output" | grep -Eq '^cp2 +cp +3 +- +no +no '
 }
 
-@test "status: un nodo en 24.04 con otro kernel no figura como actualizado" {
+@test "status: a node on 24.04 with another kernel is not shown as upgraded" {
   y -i -p json -o json "(.items[] | select(.metadata.name == \"w1\")) |= ($(upgraded_expr os-upgrade-workers "$H_W" 6.8.0-147-generic))" "$K8S/nodes.json"
   run sh "$ROLLOUT" status --nodes w1
   echo "$output" | grep -Eq '^w1 +worker +1 +- +no +no +Ubuntu_24.04.3 +6.8.0-147-generic'
 }
 
-@test "rollout 26.04: verifica contra Ubuntu 26.04 y el kernel 7.0" {
+@test "rollout 26.04: verifies against Ubuntu 26.04 and kernel 7.0" {
   set_target_2604
   frame os-upgrade-workers w1 1 ok ok ok complete "$(upgraded_expr os-upgrade-workers "$H_W" 7.0.0-38-generic 'Ubuntu 26.04.1 LTS')"
   run sh "$ROLLOUT" upgrade --nodes w1 --yes
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Ubuntu 26.04 con kernel 7.0.0-38-generic"* ]]
+  [[ "$output" == *"Ubuntu 26.04 with kernel 7.0.0-38-generic"* ]]
   [[ "$output" == *"[OK]    w1: Ubuntu 26.04.1 LTS, kernel 7.0.0-38-generic"* ]]
 }
 
-@test "rollout 26.04: un nodo que se queda en 24.04 no pasa la verificación" {
+@test "rollout 26.04: a node left on 24.04 does not pass verification" {
   set_target_2604
   frame os-upgrade-workers w1 1 ok ok ok complete "$(upgraded_expr os-upgrade-workers "$H_W" 7.0.0-38-generic)"
   SETTLE_TIMEOUT=0s run sh "$ROLLOUT" upgrade --nodes w1 --yes
   [ "$status" -eq 1 ]
-  [[ "$output" == *"sistema 'Ubuntu 24.04.3 LTS' (esperado Ubuntu 26.04)"* ]]
+  [[ "$output" == *"OS 'Ubuntu 24.04.3 LTS' (expected Ubuntu 26.04)"* ]]
 }
 
-@test "status 26.04: un nodo en 24.04 con el kernel 6.8 ya no figura como actualizado" {
+@test "status 26.04: a node on 24.04 with kernel 6.8 is no longer shown as upgraded" {
   set_target_2604
   y -i -p json -o json "(.items[] | select(.metadata.name == \"w1\")) |= ($(upgraded_expr os-upgrade-workers "$H_W"))" "$K8S/nodes.json"
   y -i -p json -o json "(.items[] | select(.metadata.name == \"w2\")) |= ($(upgraded_expr os-upgrade-workers "$H_W" 7.0.0-38-generic 'Ubuntu 26.04.1 LTS'))" "$K8S/nodes.json"
@@ -314,11 +328,11 @@ EOF2
   echo "$output" | grep -Eq '^w2 +worker +1 +- +- +ok +Ubuntu_26.04.1'
 }
 
-@test "rollout: sin pod del Job todavía no hay errores de yq en la salida" {
+@test "rollout: no yq errors in the output while the Job pod does not exist yet" {
   frame os-upgrade-workers w1 1 "" "" "" active
   frame os-upgrade-workers w1 2 ok ok ok complete "$(upgraded_expr os-upgrade-workers "$H_W")"
   run sh "$ROLLOUT" upgrade --nodes w1 --yes
   [ "$status" -eq 0 ]
-  [[ "$output" == *"w1: esperando a que el SUC cree el Job"* ]]
+  [[ "$output" == *"w1: waiting for the SUC to create the Job"* ]]
   [[ "$output" != *"out of range"* ]]
 }

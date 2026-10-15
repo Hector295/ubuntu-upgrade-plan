@@ -1,4 +1,4 @@
-# Funciones comunes de los stubs. Estado en $STUB_STATE, raíz falsa en $ROOT.
+# Common stub helpers. State lives in $STUB_STATE, the fake root in $ROOT.
 # shellcheck shell=sh
 record() { echo "$*" >> "$STUB_STATE/calls.log"; }
 fail_if() { if [ -f "$STUB_STATE/fail.$1" ]; then exit 1; fi; }

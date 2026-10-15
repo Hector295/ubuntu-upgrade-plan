@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Render de Kustomize y validación contra el CRD real de Rancher (manifests/schemas/lab).
+# Kustomize render and validation against the real Rancher CRD (manifests/schemas/lab).
 
 REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 YQ="$REPO/tools/bin/yq"
@@ -16,16 +16,16 @@ setup() {
   M="$BATS_TEST_TMPDIR/m.yaml"
 }
 
-# Modifica los documentos que cumplan el filtro.
+# Edits the documents that match the filter.
 edit() { "$YQ" -i "$1" "$M"; }
 
-@test "render lab: válido" {
+@test "render lab: valid" {
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Validación OK"*"6.8.0-139-generic"* ]]
+  [[ "$output" == *"Validation OK"*"6.8.0-139-generic"* ]]
 }
 
-@test "render lab: los Plans referencian el Secret y el ConfigMap con hash generados" {
+@test "render lab: the Plans reference the generated hashed Secret and ConfigMap" {
   secret=$("$YQ" 'select(.kind == "Secret") | .metadata.name' "$M")
   cm=$("$YQ" 'select(.kind == "ConfigMap") | .metadata.name' "$M")
   [[ "$secret" == os-upgrade-script-* ]]
@@ -34,101 +34,101 @@ edit() { "$YQ" -i "$1" "$M"; }
   [ "$("$YQ" ea '[select(.kind == "Plan") | .spec.upgrade.envFrom[0].configMapRef.name] | unique | .[]' "$M")" = "$cm" ]
 }
 
-@test "render lab: el Secret contiene el upgrade.sh actual" {
+@test "render lab: the Secret contains the current upgrade.sh" {
   "$YQ" 'select(.kind == "Secret") | .data["upgrade.sh"]' "$M" | base64 -d > "$BATS_TEST_TMPDIR/u.sh"
   cmp "$BATS_TEST_TMPDIR/u.sh" "$REPO/scripts/upgrade.sh"
 }
 
-@test "render lab: prepare antes del drain y solo en los Plans de upgrade" {
+@test "render lab: prepare before the drain and only in the upgrade Plans" {
   [ "$("$YQ" 'select(.metadata.name == "os-upgrade-workers") | .spec.prepare.args[2]' "$M")" = prepare ]
   [ "$("$YQ" 'select(.metadata.name == "os-upgrade-cp") | .spec.prepare.securityContext.privileged' "$M")" = true ]
   [ "$("$YQ" 'select(.metadata.name == "os-upgrade-predownload") | .spec.drain' "$M")" = null ]
   [ "$("$YQ" 'select(.metadata.name == "os-upgrade-predownload") | .spec.prepare' "$M")" = null ]
 }
 
-@test "validación: postCompleteLabels se rechaza" {
+@test "validation: postCompleteLabels is rejected" {
   edit '(select(.kind == "Plan") | .spec.postCompleteLabels) = {"os-upgrade": "done"}'
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 1 ]
   [[ "$output" == *"postCompleteLabels"* ]]
 }
 
-@test "validación: drain.timeout se rechaza" {
+@test "validation: drain.timeout is rejected" {
   edit '(select(.metadata.name == "os-upgrade-cp") | .spec.drain.timeout) = 1800000000000'
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"os-upgrade-cp: spec.drain.timeout está prohibido"* ]]
+  [[ "$output" == *"os-upgrade-cp: spec.drain.timeout is forbidden"* ]]
 }
 
-@test "validación: un campo que el CRD no conoce se rechaza" {
-  edit '(select(.metadata.name == "os-upgrade-workers") | .spec.upgrade.inventado) = true'
+@test "validation: a field the CRD does not know is rejected" {
+  edit '(select(.metadata.name == "os-upgrade-workers") | .spec.upgrade.madeUpField) = true'
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"inventado"* ]]
+  [[ "$output" == *"madeUpField"* ]]
 }
 
-@test "validación: tipo incorrecto según el CRD se rechaza" {
+@test "validation: a wrong type according to the CRD is rejected" {
   edit '(select(.metadata.name == "os-upgrade-workers") | .spec.concurrency) = "1"'
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 1 ]
 }
 
-@test "validación: KERNEL_VERSION vacío se rechaza" {
+@test "validation: empty KERNEL_VERSION is rejected" {
   edit '(select(.kind == "ConfigMap") | .data.KERNEL_VERSION) = ""'
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"KERNEL_VERSION no está definido"* ]]
+  [[ "$output" == *"KERNEL_VERSION is not set"* ]]
 }
 
-@test "validación: KERNEL_VERSION con formato inválido se rechaza" {
+@test "validation: KERNEL_VERSION with an invalid format is rejected" {
   edit '(select(.kind == "ConfigMap") | .data.KERNEL_VERSION) = "6.8-0-139-generic"'
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"KERNEL_VERSION inválido"* ]]
+  [[ "$output" == *"invalid KERNEL_VERSION"* ]]
 }
 
-@test "validación: imagen sin tag se rechaza" {
+@test "validation: an image without a tag is rejected" {
   edit '(select(.metadata.name == "os-upgrade-cp") | .spec.upgrade.image) = "registry.local:5000/ubuntu"'
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"imagen sin tag explícito: registry.local:5000/ubuntu"* ]]
+  [[ "$output" == *"image without an explicit tag: registry.local:5000/ubuntu"* ]]
 }
 
-@test "validación: concurrency distinto de 1 con drain se rechaza" {
+@test "validation: concurrency other than 1 with drain is rejected" {
   edit '(select(.metadata.name == "os-upgrade-workers") | .spec.concurrency) = 2'
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"os-upgrade-workers: los Plans con drain deben tener concurrency: 1"* ]]
+  [[ "$output" == *"os-upgrade-workers: Plans with drain must have concurrency: 1"* ]]
 }
 
-@test "validación: jobActiveDeadlineSecs fuera de rango se rechaza" {
+@test "validation: jobActiveDeadlineSecs out of range is rejected" {
   edit '(select(.metadata.name == "os-upgrade-cp") | .spec.jobActiveDeadlineSecs) = 100'
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 1 ]
   [[ "$output" == *"os-upgrade-cp: jobActiveDeadlineSecs"* ]]
 }
 
-@test "validación: proxy sin esquema se rechaza" {
+@test "validation: a proxy without a scheme is rejected" {
   edit '(select(.kind == "ConfigMap") | .data.HTTP_PROXY) = "proxy:3128"'
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"HTTP_PROXY debe empezar por http://"* ]]
+  [[ "$output" == *"HTTP_PROXY must start with http://"* ]]
 }
 
-@test "validación: namespaces distintos se rechazan" {
+@test "validation: different namespaces are rejected" {
   edit '(select(.metadata.name == "os-upgrade-cp") | .metadata.namespace) = "otro"'
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"mismo namespace"* ]]
+  [[ "$output" == *"must be in the same namespace"* ]]
 }
 
-@test "validación: sin CRD del cluster explica cómo exportarlo" {
+@test "validation: without the cluster CRD it explains how to export it" {
   run sh "$VALIDATE" "$M" "$BATS_TEST_TMPDIR/no-existe"
   [ "$status" -eq 2 ]
   [[ "$output" == *"kubectl get crd plans.upgrade.cattle.io -o json"* ]]
 }
 
-# Overlay temporal dentro del repo (kustomize no admite rutas absolutas a la base).
+# Temporary overlay inside the repo (kustomize does not accept absolute paths to the base).
 make_overlay_with_hook() {
   OVL="$REPO/manifests/overlays/.bats-$$"
   mkdir -p "$OVL"
@@ -151,48 +151,48 @@ YAML
   rm -rf "$OVL"
 }
 
-@test "hook: el overlay lo añade al Secret junto a upgrade.sh y se valida" {
-  make_overlay_with_hook "$REPO/docs/ejemplos/post-upgrade-hook.sh"
+@test "hook: the overlay adds it to the Secret next to upgrade.sh and it validates" {
+  make_overlay_with_hook "$REPO/docs/examples/post-upgrade-hook.sh"
   [ "$("$YQ" 'select(.kind == "Secret") | .data | keys | join(",")' "$M")" = "post-upgrade-hook.sh,upgrade.sh" ]
-  "$YQ" 'select(.kind == "Secret") | .data["post-upgrade-hook.sh"]' "$M" | base64 -d | cmp - "$REPO/docs/ejemplos/post-upgrade-hook.sh"
+  "$YQ" 'select(.kind == "Secret") | .data["post-upgrade-hook.sh"]' "$M" | base64 -d | cmp - "$REPO/docs/examples/post-upgrade-hook.sh"
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 0 ]
 }
 
-@test "hook: un error de sintaxis se detecta al validar" {
+@test "hook: a syntax error is caught by the validation" {
   printf 'if true; then\necho x\n' > "$BATS_TEST_TMPDIR/bad.sh"
   make_overlay_with_hook "$BATS_TEST_TMPDIR/bad.sh"
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"post-upgrade-hook.sh tiene errores de sintaxis"* ]]
+  [[ "$output" == *"post-upgrade-hook.sh has syntax errors"* ]]
 }
 
-@test "validación: ALLOW_THIRD_PARTY y POST_UPGRADE_HOOK_RETRIES" {
+@test "validation: ALLOW_THIRD_PARTY and POST_UPGRADE_HOOK_RETRIES" {
   [ "$("$YQ" 'select(.kind == "ConfigMap") | .data.ALLOW_THIRD_PARTY' "$M")" = true ]
   edit '(select(.kind == "ConfigMap") | .data.ALLOW_THIRD_PARTY) = "yes"'
   edit '(select(.kind == "ConfigMap") | .data.POST_UPGRADE_HOOK_RETRIES) = "x"'
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ALLOW_THIRD_PARTY debe ser true o false"* ]]
-  [[ "$output" == *"POST_UPGRADE_HOOK_RETRIES debe ser un número entero"* ]]
+  [[ "$output" == *"ALLOW_THIRD_PARTY must be true or false"* ]]
+  [[ "$output" == *"POST_UPGRADE_HOOK_RETRIES must be an integer"* ]]
 }
 
-@test "validación: TARGET_VERSION no soportado se rechaza" {
+@test "validation: an unsupported TARGET_VERSION is rejected" {
   edit '(select(.kind == "ConfigMap") | .data.TARGET_VERSION) = "25.10"'
   edit '(select(.kind == "Plan") | .spec.version) = "25.10"'
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"TARGET_VERSION '25.10' no soportado (soportados: 24.04 26.04 )"* ]]
+  [[ "$output" == *"TARGET_VERSION '25.10' not supported (supported: 24.04 26.04 )"* ]]
 }
 
-@test "validación: spec.version de los Plans debe coincidir con TARGET_VERSION" {
+@test "validation: the Plans spec.version must match TARGET_VERSION" {
   edit '(select(.kind == "ConfigMap") | .data.TARGET_VERSION) = "26.04"'
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"os-upgrade-cp: spec.version no coincide con TARGET_VERSION (26.04)"*"components/target-version"* ]]
+  [[ "$output" == *"os-upgrade-cp: spec.version does not match TARGET_VERSION (26.04)"*"components/target-version"* ]]
 }
 
-@test "render: un overlay con TARGET_VERSION=26.04 pone 26.04 en los Plans y valida" {
+@test "render: an overlay with TARGET_VERSION=26.04 sets 26.04 on the Plans and validates" {
   OVL="$REPO/manifests/overlays/.bats-2604-$$"
   mkdir -p "$OVL"
   printf 'TARGET_VERSION=26.04\nKERNEL_VERSION=7.0.0-38-generic\n' > "$OVL/config.env"

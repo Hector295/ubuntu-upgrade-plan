@@ -1,14 +1,14 @@
 #!/bin/sh
-# Descarga las herramientas de desarrollo en versiones fijas a tools/bin,
-# verificando su sha256. Idempotente: si la versión ya está instalada, no hace nada.
-# Solo linux/amd64.
+# Download the development tools, at pinned versions, into tools/bin, verifying their
+# sha256. Idempotent: if a version is already installed, nothing is done.
+# linux/amd64 only.
 set -eu
 
 TOOLS_DIR=$(cd "$(dirname "$0")" && pwd)
 BIN_DIR="$TOOLS_DIR/bin"
 GH=https://github.com
 
-# nombre|versión|url|sha256
+# name|version|url|sha256
 TOOLS="
 shellcheck|0.10.0|$GH/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz|6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87
 bats|1.11.1|$GH/bats-core/bats-core/archive/refs/tags/v1.11.1.tar.gz|5c57ed9616b78f7fd8c553b9bae3c7c9870119edd727ec17dbd1185c599f79d9
@@ -18,7 +18,7 @@ yq|4.44.3|$GH/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64|a2c097180dd8
 kubectl|1.33.5|https://dl.k8s.io/release/v1.33.5/bin/linux/amd64/kubectl|6a12d6c39e4a611a3687ee24d8c733961bb4bae1ae975f5204400c0a6930c6fc
 "
 
-[ "$(uname -s)-$(uname -m)" = "Linux-x86_64" ] || { echo "Solo soportado en Linux x86_64" >&2; exit 1; }
+[ "$(uname -s)-$(uname -m)" = "Linux-x86_64" ] || { echo "Only supported on Linux x86_64" >&2; exit 1; }
 
 install_tool() {
   name=$1 version=$2 url=$3 sum=$4
@@ -30,7 +30,7 @@ install_tool() {
   echo ">>> $name $version"
   curl -fsSL -o "$work/download" "$url"
   echo "$sum  $work/download" | sha256sum -c --quiet - \
-    || { echo "sha256 incorrecto para $name" >&2; exit 1; }
+    || { echo "wrong sha256 for $name" >&2; exit 1; }
 
   case "$name" in
     shellcheck)
@@ -59,4 +59,4 @@ echo "$TOOLS" | while IFS='|' read -r name version url sum; do
   [ -n "$name" ] || continue
   install_tool "$name" "$version" "$url" "$sum"
 done
-echo "Herramientas listas en $BIN_DIR"
+echo "Tools ready in $BIN_DIR"

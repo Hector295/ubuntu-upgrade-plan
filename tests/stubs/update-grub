@@ -1,5 +1,5 @@
 #!/bin/sh
-# Stub de update-grub: genera un grub.cfg con el formato de Ubuntu a partir de /boot.
+# update-grub stub: generates an Ubuntu-style grub.cfg from /boot.
 # shellcheck source=_lib.sh
 . "$(dirname "$0")/_lib.sh"
 record "update-grub"

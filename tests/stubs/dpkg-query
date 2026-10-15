@@ -1,5 +1,5 @@
 #!/bin/sh
-# Stub de dpkg-query: soporta -W -f='${Status}' pkg y -W -f='${db:Status-Abbrev} ${Package}\n' patrones...
+# dpkg-query stub: supports -W -f='${Status}' pkg and -W -f='${db:Status-Abbrev} ${Package}\n' patterns...
 # shellcheck source=_lib.sh
 . "$(dirname "$0")/_lib.sh"
 fmt=""
@@ -14,7 +14,7 @@ done
 set -f
 case "$fmt" in
   *db:Status-Abbrev*)
-    # Como dpkg real: un paquete retenido (apt-mark hold) aparece como "hi", no "ii".
+    # Like real dpkg: a held package (apt-mark hold) shows up as "hi", not "ii".
     found=1
     while read -r pkg; do
       for pat in $pats; do

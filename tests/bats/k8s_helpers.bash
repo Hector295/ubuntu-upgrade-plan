@@ -1,7 +1,7 @@
-# Cluster falso para los tests de rollout.sh, preflight.sh y check-cluster.sh.
-# 3 control plane (cp1 líder de etcd, cp2, cp3) y 2 workers (w1, w2), todos en 22.04.
+# Fake cluster for the rollout.sh, preflight.sh and check-cluster.sh tests.
+# 3 control planes (cp1 etcd leader, cp2, cp3) and 2 workers (w1, w2), all on 22.04.
 
-# shellcheck disable=SC2034 # variables usadas desde los .bats
+# shellcheck disable=SC2034 # variables used from the .bats files
 REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 # shellcheck disable=SC2034
 ROLLOUT="$REPO/scripts/rollout.sh"
@@ -77,7 +77,7 @@ set_applying() { y -i -p json -o json "(.items[] | select(.metadata.name == \"$1
 snapshot_age_hours() {
   echo "{\"items\":[{\"metadata\":{\"name\":\"s1\",\"creationTimestamp\":\"$(date -u -d "-$1 hour" +%FT%TZ)\"}}]}" > "$K8S/snapshots.json"
 }
-set_etcd() { # set_etcd <fila 1-3> <columna 1-7> <valor>
+set_etcd() { # set_etcd <row 1-3> <column 1-7> <value>
   awk -F'\t' -v OFS='\t' -v r="$1" -v c="$2" -v v="$3" 'NR == r {$c = v} {print}' "$K8S/etcd.tsv" > "$K8S/etcd.tmp"
   mv "$K8S/etcd.tmp" "$K8S/etcd.tsv"
 }
@@ -86,8 +86,8 @@ called() { grep -q -- "$1" "$K8S/calls.log"; }
 not_called() { ! grep -q -- "$1" "$K8S/calls.log"; }
 line_of() { grep -n -- "$1" "$K8S/calls.log" | head -n1 | cut -d: -f1; }
 
-# ------------------------------------------------------------------ fotogramas de un Job
-# Estado de contenedor: running | ok | fail | (vacío: no existe)
+# ------------------------------------------------------------------ Job frames
+# Container state: running | ok | fail | (empty: does not exist)
 ctr() {
   local name=$1 st=$2
   case "$st" in
@@ -98,8 +98,8 @@ ctr() {
 }
 join_ctrs() { local IFS=,; echo "$*"; }
 
-# frame <plan> <nodo> <n> <prepare> <drain> <upgrade> <job: active|complete|failed> [expr yq para el nodo]
-# Los estados aceptan "running@fecha" para fijar el inicio.
+# frame <plan> <node> <n> <prepare> <drain> <upgrade> <job: active|complete|failed> [yq expr for the node]
+# States accept "running@date" to set the start time.
 frame() {
   local plan=$1 node=$2 n=$3 p=$4 d=$5 u=$6 job=$7 expr=${8:-}
   local dir="$K8S/frames/$plan/$node" hash init main pods cond
@@ -124,18 +124,18 @@ frame() {
   [ -z "$expr" ] || echo "$expr" > "$dir/$n.node"
 }
 
-# Expresión yq que deja el nodo como actualizado por el Plan.
+# yq expression that leaves the node as upgraded by the Plan.
 upgraded_expr() {
   local plan=$1 hash=$2 kernel=${3:-$TARGET_KERNEL} os=${4:-Ubuntu 24.04.3 LTS}
   echo ".metadata.labels[\"plan.upgrade.cattle.io/$plan\"] = \"$hash\" | .status.nodeInfo.osImage = \"$os\" | .status.nodeInfo.kernelVersion = \"$kernel\" | .spec.unschedulable = false"
 }
 
-# Campaña 24.04 -> 26.04 en el ConfigMap de los Plans.
+# 24.04 -> 26.04 campaign in the Plans ConfigMap.
 set_target_2604() {
   y -i -p json -o json '.items[0].data.TARGET_VERSION = "26.04" | .items[0].data.KERNEL_VERSION = "7.0.0-38-generic"' "$K8S/configmaps.json"
 }
 
-# Upgrade completo y correcto de un nodo.
+# Complete, successful upgrade of a node.
 scenario_success() {
   local node=$1 plan=$2 hash=$3
   frame "$plan" "$node" 1 running "" "" active

@@ -1,7 +1,7 @@
 # shellcheck shell=sh
-# Acceso al cluster: kubectl, Plans, nodos y etcd. Requiere common.sh.
+# Cluster access: kubectl, Plans, nodes and etcd. Requires common.sh.
 
-# Constantes usadas por los scripts que cargan esta librería.
+# Constants used by the scripts that source this library.
 # shellcheck disable=SC2034
 PLAN_PREDOWNLOAD=os-upgrade-predownload
 PLAN_WORKERS=os-upgrade-workers
@@ -27,7 +27,7 @@ config_value() {
   k -n "$NS" get configmap "$cm" -o json | jq_ ".data.$1 // \"\""
 }
 
-# Versión destino de la campaña (TARGET_VERSION del ConfigMap; 24.04 si no está definida).
+# Target version of the campaign (TARGET_VERSION from the ConfigMap; 24.04 if unset).
 target_version() {
   v=$(config_value TARGET_VERSION 2>/dev/null || true)
   echo "${v:-24.04}"
@@ -35,7 +35,7 @@ target_version() {
 
 plan_image() { plan_json "$PLAN_WORKERS" | jq_ '.spec.upgrade.image // ""'; }
 
-# ------------------------------------------------------------------ nodos
+# ------------------------------------------------------------------ nodes
 nodes_json() { k get nodes -o json; }
 node_json() { k get node "$1" -o json; }
 
@@ -51,28 +51,28 @@ node_ip() {
   node_json "$1" | jq_ '.status.addresses[] | select(.type == "InternalIP") | .address' | head -n1
 }
 
-# Nodos que cumplen un selector de labels, ordenados por nombre.
+# Nodes matching a label selector, sorted by name.
 nodes_by_selector() {
   k get nodes -l "$1" -o json | jq_ '.items[].metadata.name' | sort
 }
 
-# ------------------------------------------------------------------ Jobs y pods de SUC
+# ------------------------------------------------------------------ SUC Jobs and pods
 node_jobs_json() {
   k -n "$NS" get jobs -l "upgrade.cattle.io/plan=$2,upgrade.cattle.io/node=$1" -o json
 }
 
-# Pod más reciente del Job de un nodo para un Plan.
+# Newest pod of a node's Job for a Plan.
 node_pod_json() {
   k -n "$NS" get pods -l "upgrade.cattle.io/plan=$2,upgrade.cattle.io/node=$1" -o json \
     | jq_ -o json -I0 '[.items[]] | sort_by(.metadata.creationTimestamp) | reverse | .[0] // {}'
 }
-# (".[-1]" sobre una lista vacía es un error en yq, no null: de ahí el reverse.)
+# (In yq ".[-1]" on an empty list is an error, not null: hence the reverse.)
 
 # ------------------------------------------------------------------ etcd
-# Pod de etcd en ejecución y listo, evitando el nodo indicado (el que se va a actualizar).
+# Running and ready etcd pod, avoiding the given node (the one about to be upgraded).
 etcd_pod() {
   avoid=${1:-}
-  # Sin shell: el contenedor de etcd de RKE2 ya no trae /bin/sh, etcdctl se ejecuta directo.
+  # No shell: the RKE2 etcd container no longer ships /bin/sh, etcdctl is run directly.
   k -n kube-system get pods -l component=etcd -o json | jq_ "
     .items[]
     | select(.status.phase == \"Running\")
@@ -81,17 +81,17 @@ etcd_pod() {
     | .metadata.name" | head -n1
 }
 
-# etcdctl dentro de un pod de etcd. Uso: etcd_ctl <nodo-a-evitar> <args...>
+# etcdctl inside an etcd pod. Usage: etcd_ctl <node-to-avoid> <args...>
 etcd_ctl() {
   avoid=$1
   shift
   pod=$(etcd_pod "$avoid")
-  [ -n "$pod" ] || { err "no hay ningún pod de etcd listo (evitando '$avoid')"; return 1; }
-  # shellcheck disable=SC2086 # ETCD_CERTS son varias opciones
+  [ -n "$pod" ] || { err "no ready etcd pod (avoiding '$avoid')"; return 1; }
+  # shellcheck disable=SC2086 # ETCD_CERTS holds several options
   k -n kube-system exec "$pod" -- etcdctl $ETCD_CERTS "$@"
 }
 
-# Tabla de etcdctl (-w table) -> TSV con cabecera.
+# etcdctl table (-w table) -> TSV with a header row.
 table_to_tsv() {
   awk -F'|' '/^\|/ {
     out = ""
@@ -100,8 +100,8 @@ table_to_tsv() {
   }'
 }
 
-# Selecciona columnas por nombre de una TSV con cabecera: tsv_select "ENDPOINT|IS LEADER".
-# Funciona con las tablas de etcd 3.5 y 3.6 (cambia el orden y el número de columnas).
+# Selects columns by name from a TSV with a header: tsv_select "ENDPOINT|IS LEADER".
+# Works with etcd 3.5 and 3.6 tables (column order and count differ).
 tsv_select() {
   awk -F'\t' -v cols="$1" '
     BEGIN { n = split(cols, want, "|") }
@@ -113,19 +113,19 @@ tsv_select() {
     }'
 }
 
-# Estado de etcd: "endpoint<TAB>id<TAB>is_leader<TAB>raft_index<TAB>errors" por miembro.
+# etcd status: "endpoint<TAB>id<TAB>is_leader<TAB>raft_index<TAB>errors" per member.
 etcd_status() {
   { etcd_ctl "${1:-}" endpoint status --cluster -w table 2>/dev/null || true; } \
     | table_to_tsv | tsv_select "ENDPOINT|ID|IS LEADER|RAFT INDEX|ERRORS"
 }
 
-# Salud: "endpoint<TAB>health" por miembro.
+# Health: "endpoint<TAB>health" per member.
 etcd_health() {
   { etcd_ctl "${1:-}" endpoint health --cluster -w table 2>/dev/null || true; } \
     | table_to_tsv | tsv_select "ENDPOINT|HEALTH"
 }
 
-# Miembros: "id<TAB>name<TAB>client_addrs".
+# Members: "id<TAB>name<TAB>client_addrs".
 etcd_members() {
   { etcd_ctl "${1:-}" member list -w table 2>/dev/null || true; } \
     | table_to_tsv | tsv_select "ID|NAME|CLIENT ADDRS"
@@ -133,13 +133,13 @@ etcd_members() {
 
 endpoint_ip() { echo "$1" | sed -E 's#^[a-z]+://\[?([^]/]*)\]?:[0-9]+.*#\1#'; }
 
-# Nodo cuyo InternalIP coincide con el endpoint de etcd.
+# Node whose InternalIP matches the etcd endpoint.
 node_for_endpoint() {
   ip=$(endpoint_ip "$1")
   nodes_json | jq_ ".items[] | select(.status.addresses[] | select(.type == \"InternalIP\" and .address == \"$ip\")) | .metadata.name" | head -n1
 }
 
-# Nombre del nodo que es líder de etcd (vacío si no se puede determinar).
+# Name of the node that is the etcd leader (empty if it cannot be determined).
 etcd_leader_node() {
   leader=$(etcd_status "${1:-}" | awk -F'\t' '$3 == "true" {print $1; exit}')
   [ -n "$leader" ] || return 1

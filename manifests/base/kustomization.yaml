@@ -1,5 +1,5 @@
-# Base común a todos los clusters. No editar para un cluster concreto: crear un overlay
-# en manifests/overlays/<cluster> (ver docs/configuracion.md).
+# Base shared by every cluster. Do not edit it for a specific cluster: create an overlay
+# in manifests/overlays/<cluster> (see docs/configuration.md).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -13,8 +13,8 @@ resources:
 configurations:
   - kustomizeconfig.yaml
 
-# El script y la configuración llevan un hash en el nombre: cualquier cambio genera un
-# Secret/ConfigMap nuevo y, con él, un Plan nuevo. Así cada nodo usa una versión conocida.
+# The script and the configuration carry a hash in their names: any change creates a new
+# Secret/ConfigMap and, with it, a new Plan. This way every node runs a known version.
 secretGenerator:
   - name: os-upgrade-script
     files:

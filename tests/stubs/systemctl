@@ -1,5 +1,5 @@
 #!/bin/sh
-# Stub de systemctl: unidades activas = archivos $STUB_STATE/active.<unidad>.
+# systemctl stub: active units = files $STUB_STATE/active.<unit>.
 # shellcheck source=_lib.sh
 . "$(dirname "$0")/_lib.sh"
 record "systemctl $*"
@@ -11,7 +11,7 @@ done
 set -- $args
 case "$1" in
   is-active)
-    # activating.<unidad> = consultas que faltan para que esté activa (como rke2 tras un reboot).
+    # activating.<unit> = queries left until it becomes active (like rke2 after a reboot).
     if [ -f "$STUB_STATE/activating.$2" ]; then
       n=$(cat "$STUB_STATE/activating.$2")
       if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$STUB_STATE/activating.$2"; echo activating; exit 3; fi

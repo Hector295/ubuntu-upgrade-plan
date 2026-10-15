@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Transición 24.04 -> 26.04 (TARGET_VERSION=26.04): nodo de origen en noble con un kernel 6.8.
+# Transition 24.04 -> 26.04 (TARGET_VERSION=26.04): source node on noble with a 6.8 kernel.
 
 load helpers
 
@@ -11,7 +11,7 @@ setup() {
   export TARGET_VERSION=26.04 KERNEL_VERSION=$NEW_KERNEL
   set_os 24.04
   set_running "$NOBLE_KERNEL"
-  # Nodo 24.04 actualizado antes con esta herramienta: kernel 6.8 fijado y retenido.
+  # 24.04 node upgraded earlier with this tool: 6.8 kernel pinned and held.
   printf '%s\n' linux-generic-hwe-24.04 "linux-image-$NOBLE_KERNEL" "linux-modules-$NOBLE_KERNEL" \
     "linux-modules-extra-$NOBLE_KERNEL" linux-firmware update-manager-core > "$STUB_STATE/installed"
   printf '%s\n' "linux-image-$NOBLE_KERNEL" "linux-modules-$NOBLE_KERNEL" "linux-modules-extra-$NOBLE_KERNEL" > "$STUB_STATE/held"
@@ -25,7 +25,7 @@ setup() {
 state() { echo "$ROOT/var/lib/os-upgrade/$1"; }
 grub_default() { sed -n 's/^set default="\(.*\)"$/\1/p' "$ROOT/boot/grub/grub.cfg"; }
 
-@test "26.04: la pre-descarga pide image, modules y main-modules-zfs (no existe modules-extra)" {
+@test "26.04: the predownload asks for image, modules and main-modules-zfs (no modules-extra)" {
   run sh "$SCRIPT" predownload
   [ "$status" -eq 0 ]
   called "download linux-image-$NEW_KERNEL linux-modules-$NEW_KERNEL linux-main-modules-zfs-$NEW_KERNEL"
@@ -34,7 +34,7 @@ grub_default() { sed -n 's/^set default="\(.*\)"$/\1/p' "$ROOT/boot/grub/grub.cf
   grep -qx "TARGET_VERSION=26.04" "$(state predownload.ok)"
 }
 
-@test "26.04: upgrade completo con un reboot y el kernel 7.0 fijado" {
+@test "26.04: full upgrade with one reboot and the 7.0 kernel pinned" {
   fake_predownload
   run sh "$SCRIPT" upgrade
   called "do-release-upgrade -f DistUpgradeViewNonInteractive --allow-third-party"
@@ -50,23 +50,23 @@ grub_default() { sed -n 's/^set default="\(.*\)"$/\1/p' "$ROOT/boot/grub/grub.cf
   run sh "$SCRIPT" upgrade
   [ "$status" -eq 0 ]
   [[ "$output" == *"OK: Ubuntu 26.04, kernel $NEW_KERNEL"* ]]
-  # El kernel 6.8 de 24.04 (retenido) se purga entero, incluido modules-extra.
+  # The (held) 6.8 kernel from 24.04 is purged entirely, modules-extra included.
   not_installed "linux-image-$NOBLE_KERNEL"
   not_installed "linux-modules-extra-$NOBLE_KERNEL"
-  grep -qx "sistema:        Ubuntu 26.04" "$ROOT/var/log/os-upgrade-report.txt"
+  grep -qx "system:         Ubuntu 26.04" "$ROOT/var/log/os-upgrade-report.txt"
   [ "$(reboot_count)" -eq 1 ]
 }
 
-@test "26.04: nodo en 22.04 se rechaza en prepare (no se salta una LTS)" {
+@test "26.04: a 22.04 node is rejected in prepare (an LTS cannot be skipped)" {
   fake_predownload
   set_os 22.04
   run sh "$SCRIPT" prepare
   [ "$status" -eq 1 ]
-  [[ "$output" == *"el nodo está en 22.04 y el destino es 26.04"*"actualizar antes a 24.04 (TARGET_VERSION=24.04)"* ]]
+  [[ "$output" == *"the node is on 22.04 and the target is 26.04"*"upgrade it to 24.04 first (TARGET_VERSION=24.04)"* ]]
   [ ! -f "$(state failed)" ]
 }
 
-@test "26.04: nodo ya en 26.04 solo cambia el kernel" {
+@test "26.04: a node already on 26.04 only changes the kernel" {
   fake_predownload
   set_os 26.04
   run sh "$SCRIPT" upgrade
@@ -75,13 +75,13 @@ grub_default() { sed -n 's/^set default="\(.*\)"$/\1/p' "$ROOT/boot/grub/grub.cf
   [ "$(reboot_count)" -eq 1 ]
 }
 
-@test "TARGET_VERSION no soportado se rechaza" {
+@test "unsupported TARGET_VERSION is rejected" {
   TARGET_VERSION=25.10 run sh "$SCRIPT" prepare
   [ "$status" -eq 1 ]
-  [[ "$output" == *"TARGET_VERSION no soportado: '25.10' (soportados: 24.04 26.04 )"* ]]
+  [[ "$output" == *"unsupported TARGET_VERSION: '25.10' (supported: 24.04 26.04 )"* ]]
 }
 
-@test "24.04 sigue siendo el destino por defecto" {
+@test "24.04 is still the default target" {
   unset TARGET_VERSION
   export KERNEL_VERSION=6.8.0-139-generic
   set_os 22.04

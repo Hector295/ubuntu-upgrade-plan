@@ -1,5 +1,5 @@
-# Lab de VMs para 24.04 -> 26.04 (LAB_UBUNTU=24.04). Mismo SUC oficial v0.16.3, namespace
-# system-upgrade y la ServiceAccount system-upgrade en vez de los de Rancher.
+# VM lab for 24.04 -> 26.04 (LAB_UBUNTU=24.04). Same official SUC v0.16.3: namespace
+# system-upgrade and ServiceAccount system-upgrade instead of the Rancher ones.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -23,7 +23,7 @@ patches:
       - op: replace
         path: /spec/serviceAccountName
         value: system-upgrade
-  # En el lab no hace falta esperar 10 min entre control planes.
+  # The lab does not need to wait 10 min between control planes.
   - target: {kind: Plan, name: os-upgrade-cp}
     patch: |
       - op: replace

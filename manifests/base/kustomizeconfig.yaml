@@ -1,5 +1,5 @@
-# Enseña a kustomize dónde referencia un Plan (CRD) a Secrets, ConfigMaps e imágenes,
-# para que propague los nombres con hash y el campo "images" de los overlays.
+# Tells kustomize where a Plan (CRD) references Secrets, ConfigMaps and images, so that it
+# propagates the hashed names and the "images" field of the overlays.
 nameReference:
   - kind: Secret
     fieldSpecs:

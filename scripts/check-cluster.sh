@@ -1,7 +1,7 @@
 #!/bin/sh
-# Estado del cluster: nodos, etcd, Plans/Jobs de os-upgrade y pods con problemas, y un
-# veredicto final. Solo lectura. Sale con 1 si los nodos, etcd o los DaemonSets no están sanos.
-# Uso: check-cluster.sh
+# Cluster status: nodes, etcd, os-upgrade Plans/Jobs and pods with problems, plus a final
+# verdict. Read-only. Exits with 1 if nodes, etcd or DaemonSets are not healthy.
+# Usage: check-cluster.sh
 set -eu
 
 # shellcheck source=lib/common.sh
@@ -13,9 +13,9 @@ set -eu
 
 require_tools
 
-echo "=== Contexto: $(k config current-context 2>/dev/null || echo '?')"
+echo "=== Context: $(k config current-context 2>/dev/null || echo '?')"
 echo
-echo "=== Nodos"
+echo "=== Nodes"
 k get nodes -o wide -L os-upgrade -L os-upgrade-group || true
 
 echo
@@ -24,24 +24,24 @@ etcd_ctl "" member list -w table || true
 etcd_ctl "" endpoint status --cluster -w table || true
 etcd_ctl "" endpoint health --cluster -w table || true
 alarms=$(etcd_ctl "" alarm list 2>/dev/null || true)
-echo "Alarmas: ${alarms:-ninguna}"
+echo "Alarms: ${alarms:-none}"
 
 echo
-echo "=== Plans, Jobs y pods de upgrade ($NS)"
+echo "=== Upgrade Plans, Jobs and pods ($NS)"
 k -n "$NS" get plans,jobs,pods -o wide 2>&1 || true
 
 echo
-echo "=== Pods con problemas (todo el cluster)"
+echo "=== Pods with problems (whole cluster)"
 bad=$(k get pods -A -o json | jq_ '
   .items[]
   | select(
       (.status.phase != "Running" and .status.phase != "Succeeded")
       or ([.status.containerStatuses[]? | select(.state.waiting.reason == "CrashLoopBackOff" or .state.waiting.reason == "ImagePullBackOff" or .state.waiting.reason == "ErrImagePull")] | length > 0))
   | .metadata.namespace + "/" + .metadata.name + " " + .status.phase + " " + (.spec.nodeName // "-")')
-echo "${bad:-ninguno}"
+echo "${bad:-none}"
 
 echo
-echo "=== Veredicto"
+echo "=== Verdict"
 check_nodes_ready || true
 check_etcd "" || true
 check_daemonsets || true

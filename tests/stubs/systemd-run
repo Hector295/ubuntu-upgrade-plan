@@ -1,5 +1,5 @@
 #!/bin/sh
-# Stub de systemd-run: ejecuta la unidad de forma síncrona sobre la raíz falsa.
+# systemd-run stub: runs the unit synchronously on the fake root.
 # shellcheck source=_lib.sh
 . "$(dirname "$0")/_lib.sh"
 record "systemd-run $*"
@@ -7,7 +7,7 @@ fail_if systemd-run
 for a in "$@"; do
   case "$a" in --*) ;; *) set -- "$@" "$a" ;; esac
 done
-# Los dos últimos argumentos: ruta del script en el host y subcomando.
+# The last two arguments: host script path and subcommand.
 while [ $# -gt 2 ]; do shift; done
 rc=0
 sh "$ROOT$1" "$2" >> "$STUB_STATE/unit.log" 2>&1 || rc=$?

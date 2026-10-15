@@ -1,6 +1,6 @@
-# Herramientas descargadas por tools/install.sh
+# Tools downloaded by tools/install.sh
 /tools/bin/
 /tools/bats-core/
-# Manifiestos generados (make render)
+# Generated manifests (make render) and local lab state
 /out/
 /.lab/

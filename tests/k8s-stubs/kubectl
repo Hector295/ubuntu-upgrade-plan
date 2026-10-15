@@ -1,6 +1,6 @@
 #!/bin/sh
-# Stub de kubectl para los tests de rollout/preflight/check-cluster. El "cluster" vive en
-# archivos de $K8S (ver tests/bats/k8s_helpers.bash). Registra cada llamada en calls.log.
+# kubectl stub for the rollout/preflight/check-cluster tests. The "cluster" lives in files
+# under $K8S (see tests/bats/k8s_helpers.bash). Every call is recorded in calls.log.
 set -eu
 S=$K8S
 echo "kubectl $*" >> "$S/calls.log"
@@ -29,7 +29,7 @@ done
 list() { printf '{"apiVersion":"v1","kind":"List","items":[]}\n'; }
 sel_value() { echo "$sel" | tr ',' '\n' | sed -n "s|^$1=||p"; }
 
-# Tablas de etcdctl a partir de etcd.tsv: endpoint id leader raft errors health name
+# etcdctl tables built from etcd.tsv: endpoint id leader raft errors health name
 etcd_table() {
   case "$1" in
     status)
@@ -115,13 +115,13 @@ case "$p1" in
   uncordon) y -i -p json -o json "(.items[] | select(.metadata.name == \"$p2\")).spec.unschedulable = false" "$S/nodes.json" ;;
   delete) [ ! -f "$S/fail.$p1" ] || exit 1 ;;
   run)
-    # Como el API server: nombre DNS-1123 (minúsculas, dígitos y guiones; sin guion al final).
+    # Like the API server: DNS-1123 name (lowercase, digits and dashes; no trailing dash).
     echo "$p2" | grep -Eq '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$' || { echo "invalid name: $p2" >&2; exit 1; }
     [ ! -f "$S/fail.$p1" ] || exit 1 ;;
   wait) [ ! -f "$S/nettest-fail" ] || exit 1 ;;
   logs)
     if [ -f "$S/logs.$container.txt" ]; then cat "$S/logs.$container.txt"
-    elif [ -n "$container" ]; then echo "log de $container"
+    elif [ -n "$container" ]; then echo "log of $container"
     else echo "10.43.0.1 kubernetes.default.svc.cluster.local"; fi ;;
   exec)
     case "$rest" in

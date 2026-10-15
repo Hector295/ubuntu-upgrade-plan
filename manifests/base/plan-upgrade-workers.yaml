@@ -1,14 +1,14 @@
-# Upgrade de workers (nodos sin rol control-plane). Nodos: label os-upgrade=upgrade.
-# Orden del Job: prepare (preflight, ANTES del drain) -> drain -> upgrade (1 reboot).
+# Worker upgrade (nodes without the control-plane role). Nodes: label os-upgrade=upgrade.
+# Job order: prepare (preflight, BEFORE the drain) -> drain -> upgrade (1 reboot).
 apiVersion: upgrade.cattle.io/v1
 kind: Plan
 metadata:
   name: os-upgrade-workers
 spec:
-  version: "24.04"                 # lo sustituye TARGET_VERSION (components/target-version)
+  version: "24.04"                 # replaced by TARGET_VERSION (components/target-version)
   concurrency: 1
-  exclusive: true                  # ver nota en plan-predownload.yaml
-  jobActiveDeadlineSecs: 7200      # por nodo, drain y reboot incluidos
+  exclusive: true                  # see the note in plan-predownload.yaml
+  jobActiveDeadlineSecs: 7200      # per node, drain and reboot included
   serviceAccountName: system-upgrade-controller
   nodeSelector:
     matchExpressions:
@@ -27,9 +27,9 @@ spec:
       - configMapRef:
           name: os-upgrade-config
     securityContext:
-      privileged: true             # SUC solo da privilegios por defecto al contenedor upgrade
-  # Sin drain.timeout: en SUC v0.16 son nanosegundos en int32 (máx. ~2 s) y rompe el
-  # controller. rollout.sh supervisa el drain con su propio --drain-timeout.
+      privileged: true             # SUC only makes the upgrade container privileged by default
+  # No drain.timeout: in SUC v0.16 it is int32 nanoseconds (max ~2 s) and breaks the
+  # controller. rollout.sh supervises the drain with its own --drain-timeout.
   drain:
     force: false
     ignoreDaemonSets: true

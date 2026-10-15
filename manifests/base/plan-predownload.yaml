@@ -1,14 +1,14 @@
-# Pre-descarga de los paquetes de la versión destino y del kernel. Sin drain, cordon ni reboot:
-# se puede lanzar días antes de la ventana. Nodos: label os-upgrade=predownload.
+# Predownload of the target version packages and the kernel. No drain, cordon or reboot:
+# it can run days before the window. Nodes: label os-upgrade=predownload.
 apiVersion: upgrade.cattle.io/v1
 kind: Plan
 metadata:
   name: os-upgrade-predownload
 spec:
-  version: "24.04"                 # lo sustituye TARGET_VERSION (components/target-version)
-  concurrency: 2                   # nodos descargando a la vez (cuidado con el proxy)
-  # exclusive en SUC v0.16 = anti-afinidad por nodo: impide que este Job coincida en el
-  # mismo nodo con otro Plan exclusive (p. ej. el de upgrade). No serializa el cluster.
+  version: "24.04"                 # replaced by TARGET_VERSION (components/target-version)
+  concurrency: 2                   # nodes downloading at once (mind the proxy)
+  # exclusive in SUC v0.16 = per-node anti-affinity: this Job cannot run on the same node as
+  # another exclusive Plan (e.g. the upgrade one). It does not serialize the cluster.
   exclusive: true
   jobActiveDeadlineSecs: 3600
   serviceAccountName: system-upgrade-controller

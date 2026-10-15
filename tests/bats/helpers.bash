@@ -1,7 +1,7 @@
-# Entorno común: una raíz falsa ($ROOT) con un nodo Ubuntu 22.04 y stubs de los
-# comandos del host (tests/stubs) delante en el PATH.
+# Common setup: a fake root ($ROOT) with an Ubuntu 22.04 node and stubs of the host
+# commands (tests/stubs) first in PATH.
 
-# Variables usadas desde los .bats:
+# Variables used by the .bats files:
 # shellcheck disable=SC2034
 REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 # shellcheck disable=SC2034
@@ -39,12 +39,11 @@ add_boot_kernel() {
 installed() { grep -qx "$1" "$STUB_STATE/installed"; }
 not_installed() { ! grep -qx "$1" "$STUB_STATE/installed"; }
 called() { grep -q -- "$1" "$STUB_STATE/calls.log"; }
-# En bats, "! cmd" no hace fallar el test; usar esta función para negaciones.
+# In bats, "! cmd" does not fail the test; use this function for negations.
 not_called() { ! grep -q -- "$1" "$STUB_STATE/calls.log" 2>/dev/null; }
 reboot_count() { [ -f "$STUB_STATE/reboots.log" ] && wc -l < "$STUB_STATE/reboots.log" || echo 0; }
 
-# Simula una pre-descarga completa (como la deja el subcomando predownload).
-# Prefijos de los paquetes del kernel según el destino (como la tabla TRANSITIONS).
+# Kernel package prefixes for the target release (like the TRANSITIONS table).
 kernel_prefixes() {
   case "${TARGET_VERSION:-24.04}" in
     26.04) echo linux-image linux-modules linux-main-modules-zfs ;;
@@ -52,6 +51,7 @@ kernel_prefixes() {
   esac
 }
 
+# Simulates a complete predownload (as the predownload subcommand leaves it).
 fake_predownload() {
   local d="$ROOT/var/lib/os-upgrade/archives"
   mkdir -p "$d"
@@ -61,7 +61,7 @@ fake_predownload() {
   printf 'KERNEL_VERSION=%s\nTARGET_VERSION=%s\n' "$KERNEL_VERSION" "${TARGET_VERSION:-24.04}" > "$ROOT/var/lib/os-upgrade/predownload.ok"
 }
 
-# Simula el reboot: arranca el kernel por defecto de GRUB (o el indicado).
+# Simulates the reboot: boots the GRUB default kernel (or the given one).
 simulate_reboot() {
   rm -f "$ROOT/run/reboot-required.pkgs"
   local cfg="$ROOT/boot/grub/grub.cfg" def k

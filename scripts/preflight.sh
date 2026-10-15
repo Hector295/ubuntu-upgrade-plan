@@ -1,10 +1,10 @@
 #!/bin/sh
-# Comprobaciones previas a una campaña de upgrade. Solo lectura: no cambia nada en el cluster.
+# Checks before an upgrade campaign. Read-only: changes nothing in the cluster.
 #
-# Uso: preflight.sh [--group G | --nodes n1,n2]
-#   --group/--nodes limitan la comprobación de espacio en disco a esos nodos (por defecto, todos).
+# Usage: preflight.sh [--group G | --nodes n1,n2]
+#   --group/--nodes limit the disk space check to those nodes (default: all nodes).
 #
-# Sale con 1 si alguna comprobación falla; los avisos no hacen fallar.
+# Exits with 1 if any check fails; warnings do not make it fail.
 set -eu
 
 # shellcheck source=lib/common.sh
@@ -31,8 +31,8 @@ done
 
 require_tools
 
-echo "=== Preflight del cluster $(k config current-context 2>/dev/null || echo '?')"
-check_api || { echo "Sin acceso al cluster: no se puede seguir."; exit 1; }
+echo "=== Preflight of cluster $(k config current-context 2>/dev/null || echo '?')"
+check_api || { echo "No access to the cluster: cannot continue."; exit 1; }
 check_suc || true
 check_plans || true
 check_rancher_plans_idle || true
@@ -48,7 +48,7 @@ if [ -n "${nodes_arg:-}" ]; then
   nodes=$(echo "$nodes_arg" | tr ',' '\n')
 elif [ -n "$selector" ]; then
   nodes=$(nodes_by_selector "$selector")
-  [ -n "$nodes" ] || fail_check "ningún nodo con el label $selector" || true
+  [ -n "$nodes" ] || fail_check "no node with label $selector" || true
 else
   nodes=$(nodes_json | jq_ '.items[].metadata.name' | sort)
 fi
@@ -56,5 +56,5 @@ for n in $nodes; do
   check_node_disk "$n" "$min_mb" || true
 done
 
-echo "=== Resultado: $CHECK_FAILS fallo(s), $CHECK_WARNS aviso(s)"
+echo "=== Result: $CHECK_FAILS failure(s), $CHECK_WARNS warning(s)"
 [ "$CHECK_FAILS" -eq 0 ]

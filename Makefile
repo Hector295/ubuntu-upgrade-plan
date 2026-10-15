@@ -3,16 +3,16 @@ TOOLS   := tools/bin
 OUT     := out
 KUSTOMIZE_BUILD := $(TOOLS)/kustomize build --load-restrictor LoadRestrictionsNone
 
-SHELL_SCRIPTS := scripts/*.sh scripts/lib/*.sh lab/*.sh tools/install.sh tests/stubs/* tests/k8s-stubs/* tests/lab-stubs/* docs/ejemplos/*.sh $(wildcard manifests/overlays/*/post-upgrade-hook.sh)
+SHELL_SCRIPTS := scripts/*.sh scripts/lib/*.sh lab/*.sh tools/install.sh tests/stubs/* tests/k8s-stubs/* tests/lab-stubs/* docs/examples/*.sh $(wildcard manifests/overlays/*/post-upgrade-hook.sh)
 
 .PHONY: help tools lint test render validate check clean
 
 help:
-	@echo "make tools                 descarga las herramientas fijadas en tools/bin"
-	@echo "make lint                  shellcheck de todos los scripts"
-	@echo "make test                  tests bats (lógica de upgrade.sh y manifiestos)"
-	@echo "make render CLUSTER=lab    genera $(OUT)/<cluster>.yaml desde manifests/overlays/<cluster>"
-	@echo "make validate CLUSTER=lab  render + validación contra el CRD del cluster"
+	@echo "make tools                 download the pinned tools into tools/bin"
+	@echo "make lint                  shellcheck of every script"
+	@echo "make test                  bats tests (node script, operator scripts, manifests, lab)"
+	@echo "make render CLUSTER=lab    generate $(OUT)/<cluster>.yaml from manifests/overlays/<cluster>"
+	@echo "make validate CLUSTER=lab  render + validation against the cluster CRD"
 	@echo "make check                 lint + test + validate"
 
 tools:
@@ -26,10 +26,10 @@ test: tools
 	$(TOOLS)/bats tests/bats
 
 render: tools
-	@test -d manifests/overlays/$(CLUSTER) || { echo "No existe manifests/overlays/$(CLUSTER)"; exit 1; }
+	@test -d manifests/overlays/$(CLUSTER) || { echo "manifests/overlays/$(CLUSTER) does not exist"; exit 1; }
 	@mkdir -p $(OUT)
 	$(KUSTOMIZE_BUILD) manifests/overlays/$(CLUSTER) > $(OUT)/$(CLUSTER).yaml
-	@echo "Generado $(OUT)/$(CLUSTER).yaml"
+	@echo "Generated $(OUT)/$(CLUSTER).yaml"
 
 validate: render
 	sh scripts/validate-manifests.sh $(OUT)/$(CLUSTER).yaml manifests/schemas/$(CLUSTER)

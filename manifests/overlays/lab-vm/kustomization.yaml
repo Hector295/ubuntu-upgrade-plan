@@ -1,5 +1,5 @@
-# Lab de VMs (lab/lab.sh): system-upgrade-controller oficial v0.16.3, que usa el namespace
-# system-upgrade y la ServiceAccount system-upgrade en vez de los de Rancher.
+# VM lab (lab/lab.sh): official system-upgrade-controller v0.16.3, which uses the namespace
+# system-upgrade and the ServiceAccount system-upgrade instead of the Rancher ones.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -23,7 +23,7 @@ patches:
       - op: replace
         path: /spec/serviceAccountName
         value: system-upgrade
-  # En el lab no hace falta esperar 10 min entre control planes.
+  # The lab does not need to wait 10 min between control planes.
   - target: {kind: Plan, name: os-upgrade-cp}
     patch: |
       - op: replace

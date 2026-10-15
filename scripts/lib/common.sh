@@ -1,6 +1,6 @@
 # shellcheck shell=sh
-# Utilidades comunes de los scripts que corren en el equipo del operador
-# (preflight.sh, rollout.sh, check-cluster.sh). No se usan en los nodos.
+# Shared helpers for the scripts that run on the operator's machine
+# (preflight.sh, rollout.sh, check-cluster.sh). Not used on the nodes.
 
 LIB_DIR=$(cd "$(dirname "$0")/lib" && pwd)
 REPO_DIR=$(cd "$LIB_DIR/../.." && pwd)
@@ -10,12 +10,12 @@ NS="${NS:-cattle-system}"
 
 ASSUME_YES="${ASSUME_YES:-false}"
 DRY_RUN="${DRY_RUN:-false}"
-# Origen de las respuestas interactivas (los tests lo sustituyen por un archivo).
+# Source of interactive answers (tests replace it with a file).
 CONFIRM_TTY="${CONFIRM_TTY:-/dev/tty}"
 
 ts() { date '+%H:%M:%S'; }
 info() { echo "$(ts) $*"; }
-warn() { echo "$(ts) AVISO: $*" >&2; }
+warn() { echo "$(ts) WARNING: $*" >&2; }
 err() { echo "$(ts) ERROR: $*" >&2; }
 die() {
   err "$@"
@@ -23,16 +23,16 @@ die() {
 }
 
 require_tools() {
-  command -v "$KUBECTL" >/dev/null 2>&1 || die "no se encuentra kubectl"
-  [ -x "$YQ" ] || die "no se encuentra $YQ; ejecutar 'make tools'"
+  command -v "$KUBECTL" >/dev/null 2>&1 || die "kubectl not found"
+  [ -x "$YQ" ] || die "$YQ not found; run 'make tools'"
 }
 
-# yq sobre JSON leído de stdin, con salida en texto plano.
+# yq over JSON read from stdin, with plain-text output.
 jq_() { "$YQ" -p json -o yaml "$@"; }
 
 is_true() { [ "$1" = "true" ]; }
 
-# Duración "90s", "30m", "2h" o segundos -> segundos.
+# Duration "90s", "30m", "2h" or plain seconds -> seconds.
 to_seconds() {
   case "$1" in
     *[!0-9smh]*|'') return 1 ;;
@@ -45,14 +45,13 @@ to_seconds() {
 
 now() { date +%s; }
 
-# Fecha RFC3339 de Kubernetes -> epoch.
+# Kubernetes RFC3339 date -> epoch.
 to_epoch() { date -d "$1" +%s 2>/dev/null || echo 0; }
 
-# Las respuestas se leen siempre del descriptor 3, abierto una sola vez por el script
-# principal (open_answers): así cada pregunta consume la siguiente línea, también desde
-# subshells.
+# Answers are always read from file descriptor 3, opened once by the main script
+# (open_answers): each prompt consumes the next line, also from subshells.
 open_answers() {
-  # Se prueba antes en un subshell: si exec falla al redirigir, sh termina el script.
+  # Try in a subshell first: if exec fails to redirect, sh aborts the whole script.
   if ( exec 3< "$CONFIRM_TTY" ) 2>/dev/null; then
     exec 3< "$CONFIRM_TTY"
   else
@@ -60,15 +59,16 @@ open_answers() {
   fi
 }
 
-# Pregunta sí/no. Con --yes responde sí sin preguntar.
+# Yes/no question. With --yes it answers yes without asking.
 confirm() {
   if is_true "$ASSUME_YES"; then return 0; fi
-  printf '%s [s/N] ' "$1" >&2
+  printf '%s [y/N] ' "$1" >&2
   read -r answer <&3 || answer=""
-  case "$answer" in s|S|si|SI|sí|y|Y|yes) return 0 ;; *) return 1 ;; esac
+  # s/si are still accepted for backward compatibility.
+  case "$answer" in y|Y|yes|YES|s|S|si|SI) return 0 ;; *) return 1 ;; esac
 }
 
-# Pregunta con opciones de una letra; con --yes devuelve la opción por defecto.
+# One-letter choice question; with --yes it returns the default option.
 ask_choice() {
   prompt=$1
   default=$2
@@ -78,10 +78,10 @@ ask_choice() {
   echo "${answer:-$default}"
 }
 
-# Ejecuta una acción que cambia el cluster; en --dry-run solo la muestra.
+# Runs an action that changes the cluster; with --dry-run it only prints it.
 mutate() {
   if is_true "$DRY_RUN"; then
-    # A stderr: los llamadores suelen descartar la salida normal de la acción.
+    # To stderr: callers usually discard the action's normal output.
     if [ "$1" = k ]; then shift; echo "$(ts) [dry-run] kubectl $*" >&2; else echo "$(ts) [dry-run] $*" >&2; fi
     return 0
   fi
