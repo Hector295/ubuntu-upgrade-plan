@@ -113,7 +113,11 @@ case "$p1" in
       *=*) y -i -p json -o json "(.items[] | select(.metadata.name == \"$node\")).metadata.labels[\"${spec%%=*}\"] = \"${spec#*=}\"" "$S/nodes.json" ;;
     esac ;;
   uncordon) y -i -p json -o json "(.items[] | select(.metadata.name == \"$p2\")).spec.unschedulable = false" "$S/nodes.json" ;;
-  delete|run) [ ! -f "$S/fail.$p1" ] || exit 1 ;;
+  delete) [ ! -f "$S/fail.$p1" ] || exit 1 ;;
+  run)
+    # Como el API server: nombre DNS-1123 (minúsculas, dígitos y guiones; sin guion al final).
+    echo "$p2" | grep -Eq '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$' || { echo "invalid name: $p2" >&2; exit 1; }
+    [ ! -f "$S/fail.$p1" ] || exit 1 ;;
   wait) [ ! -f "$S/nettest-fail" ] || exit 1 ;;
   logs)
     if [ -f "$S/logs.$container.txt" ]; then cat "$S/logs.$container.txt"

@@ -241,7 +241,8 @@ check_node_pods() {
 check_node_dns() {
   node=$1
   image=$2
-  pod="os-upgrade-nettest-$(echo "$node" | tr -c 'a-z0-9-' '-' | cut -c1-40)"
+  # Nombre DNS-1123: printf (sin salto de línea final), solo [a-z0-9-] y sin guion al final.
+  pod="os-upgrade-nettest-$(printf '%s' "$node" | tr -c 'a-z0-9-' '-' | cut -c1-40 | sed 's/-*$//')"
   k -n "$NS" delete pod "$pod" --ignore-not-found >/dev/null 2>&1 || true
   overrides="{\"spec\":{\"nodeName\":\"$node\",\"tolerations\":[{\"operator\":\"Exists\"}]}}"
   if ! k -n "$NS" run "$pod" --image="$image" --restart=Never --overrides="$overrides" \
