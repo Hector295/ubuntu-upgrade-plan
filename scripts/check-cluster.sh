@@ -1,29 +1,48 @@
 #!/bin/sh
-# Verificación entre nodos: estado de nodos, etcd y Jobs de SUC.
-# Uso: ./check-cluster.sh
+# Estado del cluster: nodos, etcd, Plans/Jobs de os-upgrade y pods con problemas, y un
+# veredicto final. Solo lectura. Sale con 1 si los nodos, etcd o los DaemonSets no están sanos.
+# Uso: check-cluster.sh
 set -eu
 
-ETCDCTL="etcdctl --cacert /var/lib/rancher/rke2/server/tls/etcd/server-ca.crt \
-  --cert /var/lib/rancher/rke2/server/tls/etcd/server-client.crt \
-  --key /var/lib/rancher/rke2/server/tls/etcd/server-client.key"
+# shellcheck source=lib/common.sh
+. "$(dirname "$0")/lib/common.sh"
+# shellcheck source=lib/k8s.sh
+. "$LIB_DIR/k8s.sh"
+# shellcheck source=lib/checks.sh
+. "$LIB_DIR/checks.sh"
 
+require_tools
+
+echo "=== Contexto: $(k config current-context 2>/dev/null || echo '?')"
+echo
 echo "=== Nodos"
-kubectl get nodes -o wide -L os-upgrade
-
-# Usar un pod etcd que esté Running
-POD=$(kubectl -n kube-system get pods --field-selector=status.phase=Running -o name \
-  | grep '^pod/etcd-' | head -n1 | cut -d/ -f2)
-[ -n "$POD" ] || { echo "No hay pods etcd Running"; exit 1; }
-echo
-echo "=== etcd (consultado desde $POD)"
-kubectl -n kube-system exec "$POD" -- sh -c "$ETCDCTL member list -w table"
-kubectl -n kube-system exec "$POD" -- sh -c "$ETCDCTL endpoint status --cluster -w table"
-kubectl -n kube-system exec "$POD" -- sh -c "$ETCDCTL endpoint health --cluster"
+k get nodes -o wide -L os-upgrade -L os-upgrade-group || true
 
 echo
-echo "=== system-upgrade-controller"
-kubectl -n cattle-system get plans,jobs,pods -o wide 2>/dev/null || true
+echo "=== etcd"
+etcd_ctl "" member list -w table || true
+etcd_ctl "" endpoint status --cluster -w table || true
+etcd_ctl "" endpoint health --cluster -w table || true
+alarms=$(etcd_ctl "" alarm list 2>/dev/null || true)
+echo "Alarmas: ${alarms:-ninguna}"
 
 echo
-echo "=== Pods no sanos"
-kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded || true
+echo "=== Plans, Jobs y pods de upgrade ($NS)"
+k -n "$NS" get plans,jobs,pods -o wide 2>&1 || true
+
+echo
+echo "=== Pods con problemas (todo el cluster)"
+bad=$(k get pods -A -o json | jq_ '
+  .items[]
+  | select(
+      (.status.phase != "Running" and .status.phase != "Succeeded")
+      or ([.status.containerStatuses[]? | select(.state.waiting.reason == "CrashLoopBackOff" or .state.waiting.reason == "ImagePullBackOff" or .state.waiting.reason == "ErrImagePull")] | length > 0))
+  | .metadata.namespace + "/" + .metadata.name + " " + .status.phase + " " + (.spec.nodeName // "-")')
+echo "${bad:-ninguno}"
+
+echo
+echo "=== Veredicto"
+check_nodes_ready || true
+check_etcd "" || true
+check_daemonsets || true
+[ "$CHECK_FAILS" -eq 0 ]
