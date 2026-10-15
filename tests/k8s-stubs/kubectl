@@ -1,0 +1,135 @@
+#!/bin/sh
+# Stub de kubectl para los tests de rollout/preflight/check-cluster. El "cluster" vive en
+# archivos de $K8S (ver tests/bats/k8s_helpers.bash). Registra cada llamada en calls.log.
+set -eu
+S=$K8S
+echo "kubectl $*" >> "$S/calls.log"
+y() { "$YQ" "$@"; }
+
+ns="" sel="" fsel="" raw="" container="" rest=""
+p1="" p2="" p3="" p4=""
+pos() {
+  if [ -z "$p1" ]; then p1=$1; elif [ -z "$p2" ]; then p2=$1; elif [ -z "$p3" ]; then p3=$1; elif [ -z "$p4" ]; then p4=$1; fi
+}
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n) ns=$2; shift 2 ;;
+    -l) sel=$2; shift 2 ;;
+    -o) shift 2 ;;
+    -c) container=$2; shift 2 ;;
+    -A) shift ;;
+    --field-selector) fsel=$2; shift 2 ;;
+    --raw) raw=$2; shift 2 ;;
+    --) shift; rest="$*"; break ;;
+    -*) shift ;;
+    *) pos "$1"; shift ;;
+  esac
+done
+
+list() { printf '{"apiVersion":"v1","kind":"List","items":[]}\n'; }
+sel_value() { echo "$sel" | tr ',' '\n' | sed -n "s|^$1=||p"; }
+
+# Tablas de etcdctl a partir de etcd.tsv: endpoint id leader raft errors health name
+etcd_table() {
+  case "$1" in
+    status)
+      if [ -f "$S/etcd36" ]; then
+        echo "|    ENDPOINT    |  ID  | VERSION | STORAGE VERSION | DB SIZE | IN USE | IS LEADER | IS LEARNER | RAFT TERM | RAFT INDEX | RAFT APPLIED INDEX | ERRORS |"
+        awk -F'\t' '$6 == "true" {printf "| %s | %s | 3.6.0 | 3.6.0 | 20 MB | 10 MB | %s | false | 5 | %s | %s | %s |\n", $1, $2, $3, $4, $4, $5}' "$S/etcd.tsv"
+      else
+        echo "|    ENDPOINT    |  ID  | VERSION | DB SIZE | IS LEADER | IS LEARNER | RAFT TERM | RAFT INDEX | RAFT APPLIED INDEX | ERRORS |"
+        awk -F'\t' '$6 == "true" {printf "| %s | %s | 3.5.21 | 20 MB | %s | false | 5 | %s | %s | %s |\n", $1, $2, $3, $4, $4, $5}' "$S/etcd.tsv"
+      fi ;;
+    health)
+      echo "| ENDPOINT | HEALTH | TOOK | ERROR |"
+      awk -F'\t' '{printf "| %s | %s | 5ms | |\n", $1, $6}' "$S/etcd.tsv" ;;
+    members)
+      echo "| ID | STATUS | NAME | PEER ADDRS | CLIENT ADDRS | IS LEARNER |"
+      awk -F'\t' '{printf "| %s | started | %s | x | %s | false |\n", $2, $7, $1}' "$S/etcd.tsv" ;;
+  esac | sed '1{h;s/[^|]/-/g;s/|/+/g;p;x}'
+}
+
+frames_dir() { echo "$S/frames/$(sel_value upgrade.cattle.io/plan)/$(sel_value upgrade.cattle.io/node)"; }
+
+case "$p1" in
+  config) echo "ctx-prueba" ;;
+  get)
+    if [ -n "$raw" ]; then
+      case "$raw" in
+        /readyz) [ ! -f "$S/api-down" ] && echo ok || exit 1 ;;
+        */stats/summary)
+          n=$(echo "$raw" | sed 's|/api/v1/nodes/\([^/]*\)/.*|\1|')
+          cat "$S/stats/$n.json" 2>/dev/null || echo '{"node":{"fs":{"availableBytes":21474836480}}}' ;;
+      esac
+      exit 0
+    fi
+    case "$p2" in
+      nodes)
+        if [ -n "$sel" ]; then
+          expr=".items |= map(select(true"
+          for kv in $(echo "$sel" | tr ',' ' '); do
+            expr="$expr and .metadata.labels[\"${kv%%=*}\"] == \"${kv#*=}\""
+          done
+          y -p json -o json "$expr))" "$S/nodes.json"
+        else
+          cat "$S/nodes.json"
+        fi ;;
+      node) y -p json -o json ".items[] | select(.metadata.name == \"$p3\")" "$S/nodes.json" ;;
+      plan) y -p json -o json -e ".items[] | select(.metadata.name == \"$p3\")" "$S/plans.json" 2>/dev/null || { echo "plan $p3 not found" >&2; exit 1; } ;;
+      plans) cat "$S/plans.json" ;;
+      configmap) y -p json -o json ".items[] | select(.metadata.name == \"$p3\")" "$S/configmaps.json" ;;
+      deploy) [ -f "$S/deploy.json" ] && cat "$S/deploy.json" || exit 1 ;;
+      etcdsnapshotfiles) [ -f "$S/snapshots.json" ] && cat "$S/snapshots.json" || exit 1 ;;
+      pdb) cat "$S/pdb.json" 2>/dev/null || list ;;
+      ds) cat "$S/ds.json" 2>/dev/null || list ;;
+      jobs)
+        d=$(frames_dir)
+        if [ -f "$d/idx" ]; then cat "$d/$(cat "$d/idx").jobs.json"; else list; fi ;;
+      pods)
+        if [ "$ns" = kube-system ]; then cat "$S/ks-pods.json"; exit 0; fi
+        if [ -n "$fsel" ]; then
+          n=${fsel#spec.nodeName=}
+          cat "$S/nodepods/$n.json" 2>/dev/null || list
+          exit 0
+        fi
+        d=$(frames_dir)
+        [ -d "$d" ] || { list; exit 0; }
+        i=$(cat "$d/idx" 2>/dev/null || echo 0)
+        if [ -f "$d/$((i + 1)).pods.json" ]; then
+          i=$((i + 1))
+          echo "$i" > "$d/idx"
+          if [ -f "$d/$i.node" ]; then
+            node=$(sel_value upgrade.cattle.io/node)
+            y -i -p json -o json "(.items[] | select(.metadata.name == \"$node\")) |= ($(cat "$d/$i.node"))" "$S/nodes.json"
+          fi
+        fi
+        cat "$d/$i.pods.json" ;;
+    esac ;;
+  label)
+    node=$p3
+    spec=$p4
+    case "$spec" in
+      *-) y -i -p json -o json "(.items[] | select(.metadata.name == \"$node\")) |= del(.metadata.labels[\"${spec%-}\"])" "$S/nodes.json" ;;
+      *=*) y -i -p json -o json "(.items[] | select(.metadata.name == \"$node\")).metadata.labels[\"${spec%%=*}\"] = \"${spec#*=}\"" "$S/nodes.json" ;;
+    esac ;;
+  uncordon) y -i -p json -o json "(.items[] | select(.metadata.name == \"$p2\")).spec.unschedulable = false" "$S/nodes.json" ;;
+  delete|run) [ ! -f "$S/fail.$p1" ] || exit 1 ;;
+  wait) [ ! -f "$S/nettest-fail" ] || exit 1 ;;
+  logs)
+    if [ -f "$S/logs.$container.txt" ]; then cat "$S/logs.$container.txt"
+    elif [ -n "$container" ]; then echo "log de $container"
+    else echo "10.43.0.1 kubernetes.default.svc.cluster.local"; fi ;;
+  exec)
+    case "$rest" in
+      *"endpoint status"*) etcd_table status ;;
+      *"endpoint health"*) etcd_table health ;;
+      *"member list"*) etcd_table members ;;
+      *"alarm list"*) cat "$S/etcd-alarms" 2>/dev/null || true ;;
+      *move-leader*)
+        [ ! -f "$S/fail.move-leader" ] || exit 1
+        id=${rest##* }
+        awk -F'\t' -v OFS='\t' -v id="$id" '{ $3 = ($2 == id) ? "true" : "false"; print }' "$S/etcd.tsv" > "$S/etcd.tsv.new"
+        mv "$S/etcd.tsv.new" "$S/etcd.tsv" ;;
+    esac ;;
+esac
+exit 0
