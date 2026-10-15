@@ -29,7 +29,7 @@ spec:
     securityContext:
       privileged: true             # SUC solo da privilegios por defecto al contenedor upgrade
   # Sin drain.timeout: en SUC v0.16 son nanosegundos en int32 (máx. ~2 s) y rompe el
-  # controller. El drain con timeout lo hará rollout.sh (iteración 2).
+  # controller. rollout.sh supervisa el drain con su propio --drain-timeout.
   drain:
     force: false
     ignoreDaemonSets: true
