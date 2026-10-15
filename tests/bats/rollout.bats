@@ -122,6 +122,27 @@ setup() {
   not_called "delete job"
 }
 
+@test "rollout: los pods del Job del SUC en Failed (muertos por el reboot) no cuentan como problema" {
+  scenario_success w1 os-upgrade-workers "$H_W"
+  cat > "$K8S/nodepods/w1.json" <<'EOF2'
+{"items":[
+ {"metadata":{"namespace":"cattle-system","name":"apply-os-upgrade-workers-on-w1-a","labels":{"upgrade.cattle.io/controller":"system-upgrade-controller"}},"status":{"phase":"Failed"}},
+ {"metadata":{"namespace":"kube-system","name":"rke2-canal-x","ownerReferences":[{"kind":"DaemonSet"}]},"status":{"phase":"Running"}}
+]}
+EOF2
+  run sh "$ROLLOUT" upgrade --nodes w1 --yes
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[OK]    w1: todos sus pods en marcha"* ]]
+}
+
+@test "rollout: un pod de aplicación en CrashLoopBackOff sí bloquea la verificación" {
+  scenario_success w1 os-upgrade-workers "$H_W"
+  echo '{"items":[{"metadata":{"namespace":"app","name":"web-1"},"status":{"phase":"Running","containerStatuses":[{"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}}]}' > "$K8S/nodepods/w1.json"
+  SETTLE_TIMEOUT=0s run sh "$ROLLOUT" upgrade --nodes w1 --yes
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"w1: pods con problemas: app/web-1"* ]]
+}
+
 @test "rollout: verificación fallida (kernel distinto) no marca done" {
   frame os-upgrade-workers w1 1 ok ok ok complete "$(upgraded_expr os-upgrade-workers "$H_W" 6.8.0-147-generic)"
   SETTLE_TIMEOUT=0s run sh "$ROLLOUT" upgrade --nodes w1 --yes

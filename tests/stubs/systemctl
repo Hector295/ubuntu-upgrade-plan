@@ -11,6 +11,11 @@ done
 set -- $args
 case "$1" in
   is-active)
+    # activating.<unidad> = consultas que faltan para que esté activa (como rke2 tras un reboot).
+    if [ -f "$STUB_STATE/activating.$2" ]; then
+      n=$(cat "$STUB_STATE/activating.$2")
+      if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$STUB_STATE/activating.$2"; echo activating; exit 3; fi
+    fi
     if [ -f "$STUB_STATE/active.$2" ]; then echo active; exit 0; fi
     echo inactive; exit 3 ;;
   is-enabled) cat "$STUB_STATE/enabled.$2" 2>/dev/null || echo enabled ;;

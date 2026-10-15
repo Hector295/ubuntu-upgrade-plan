@@ -265,6 +265,26 @@ EOF
   [ ! -f "$(state failed)" ]
 }
 
+@test "upgrade: tras el reboot espera a que rke2 termine de arrancar (activating)" {
+  run sh "$SCRIPT" upgrade
+  simulate_reboot
+  echo 3 > "$STUB_STATE/activating.rke2-server"
+  RKE2_WAIT_SECONDS=60 RKE2_WAIT_INTERVAL=0 run sh "$SCRIPT" upgrade
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"esperando a que rke2 esté activo"* ]]
+  [[ "$output" == *"OK: Ubuntu 24.04"* ]]
+}
+
+@test "upgrade: si rke2 no arranca en RKE2_WAIT_SECONDS, falla sin marcar el nodo" {
+  run sh "$SCRIPT" upgrade
+  simulate_reboot
+  rm "$STUB_STATE/active.rke2-server"
+  RKE2_WAIT_SECONDS=0 RKE2_WAIT_INTERVAL=0 run sh "$SCRIPT" upgrade
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"rke2 no está activo tras 0 s"* ]]
+  [ ! -f "$(state failed)" ]
+}
+
 @test "upgrade: dpkg a medio configurar se marca para revisión" {
   echo "paquete X a medio configurar" > "$STUB_STATE/dpkg-audit"
   run sh "$SCRIPT" upgrade

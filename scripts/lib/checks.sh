@@ -221,11 +221,13 @@ check_daemonsets() {
   fi
 }
 
-# Pods del nodo en mal estado (fallidos, pendientes o en bucle de reinicios).
+# Pods del nodo en mal estado (fallidos, pendientes o en bucle de reinicios). No cuenta los
+# pods de los Jobs del SUC: los que corrían durante el reboot acaban siempre en Failed.
 check_node_pods() {
   node=$1
   bad=$(k get pods -A --field-selector "spec.nodeName=$node" -o json | jq_ '
     .items[]
+    | select((.metadata.labels["upgrade.cattle.io/controller"] // "") == "")
     | select(
         (.status.phase != "Running" and .status.phase != "Succeeded")
         or ([.status.containerStatuses[]? | select(.state.waiting.reason == "CrashLoopBackOff" or .state.waiting.reason == "ImagePullBackOff" or .state.waiting.reason == "ErrImagePull")] | length > 0))

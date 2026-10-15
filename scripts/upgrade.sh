@@ -38,6 +38,10 @@ MAX_REBOOTS="${MAX_REBOOTS:-3}"
 ALLOW_THIRD_PARTY="${ALLOW_THIRD_PARTY:-true}"
 POST_UPGRADE_HOOK_RETRIES="${POST_UPGRADE_HOOK_RETRIES:-3}"
 POST_UPGRADE_HOOK_SLEEP="${POST_UPGRADE_HOOK_SLEEP:-20}"
+# Tras el reboot, el pod del Job arranca antes de que rke2 termine (sigue "activating"
+# mientras se une a etcd): se espera hasta este tope antes de dar el cierre por fallido.
+RKE2_WAIT_SECONDS="${RKE2_WAIT_SECONDS:-600}"
+RKE2_WAIT_INTERVAL="${RKE2_WAIT_INTERVAL:-10}"
 
 # Transición soportada. Parametrizable para el futuro, pero solo 22.04 -> 24.04 está probada.
 SOURCE_VERSION="${SOURCE_VERSION:-22.04}"
@@ -359,6 +363,21 @@ run_post_upgrade_hook() {
   done
 }
 
+rke2_active() { systemctl is-active --quiet rke2-server || systemctl is-active --quiet rke2-agent; }
+
+wait_rke2_active() {
+  waited=0
+  until rke2_active; do
+    if [ "$waited" -ge "$RKE2_WAIT_SECONDS" ]; then
+      die "rke2 no está activo tras $RKE2_WAIT_SECONDS s; ver journalctl -u rke2-server (o rke2-agent)"
+    fi
+    [ "$waited" -gt 0 ] || info "esperando a que rke2 esté activo (hasta $RKE2_WAIT_SECONDS s)"
+    sleep "$RKE2_WAIT_INTERVAL"
+    waited=$((waited + RKE2_WAIT_INTERVAL))
+    [ "$RKE2_WAIT_INTERVAL" -gt 0 ] || waited=$((waited + 1))
+  done
+}
+
 # ------------------------------------------------------------------ reboot
 reboot_now() {
   n=$(cat "$REBOOTS_FILE" 2>/dev/null || echo 0)
@@ -550,8 +569,7 @@ finalize() {
   if [ -f "$ROOT/run/reboot-required" ]; then
     warn "hay un reboot pendiente por paquetes posteriores; no se reinicia (un solo reboot por ventana)"
   fi
-  systemctl is-active --quiet rke2-server || systemctl is-active --quiet rke2-agent \
-    || die "rke2 no está activo tras el upgrade"
+  wait_rke2_active
   disabled=$(disabled_sources)
   if [ -n "$disabled" ]; then
     warn "fuentes desactivadas por el upgrade (revisar y reactivar a mano si hacen falta): $(echo "$disabled" | tr '\n' ';')"

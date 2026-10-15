@@ -460,9 +460,11 @@ comentó (`# ... disabled on upgrade to noble` en `.list`) o les puso `Enabled: 
 Si hacen falta, comprobar que el proveedor tiene paquetes para 24.04 y reactivarlas a mano
 cambiando `jammy` por `noble`.
 
-### `rke2 no está activo tras el upgrade`
+### `rke2 no está activo tras N s`
 
-No deja marca: el Job lo reintenta. Revisar `systemctl status rke2-server` (o `rke2-agent`) y
+Tras el reboot, el cierre espera hasta 10 min a que rke2 termine de arrancar: un control plane
+tarda en volver a unirse a etcd. Si no arranca en ese tiempo, el intento falla **sin marcar el
+nodo** y el Job lo reintenta. Revisar `systemctl status rke2-server` (o `rke2-agent`) y
 `journalctl -u rke2-server`.
 
 ### El pod del Job está en `Pending` o `ImagePullBackOff`
