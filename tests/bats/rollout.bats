@@ -313,3 +313,12 @@ EOF2
   echo "$output" | grep -Eq '^w1 +worker +1 +- +no +no +Ubuntu_24.04.3'
   echo "$output" | grep -Eq '^w2 +worker +1 +- +- +ok +Ubuntu_26.04.1'
 }
+
+@test "rollout: sin pod del Job todavía no hay errores de yq en la salida" {
+  frame os-upgrade-workers w1 1 "" "" "" active
+  frame os-upgrade-workers w1 2 ok ok ok complete "$(upgraded_expr os-upgrade-workers "$H_W")"
+  run sh "$ROLLOUT" upgrade --nodes w1 --yes
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"w1: esperando a que el SUC cree el Job"* ]]
+  [[ "$output" != *"out of range"* ]]
+}

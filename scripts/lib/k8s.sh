@@ -64,8 +64,9 @@ node_jobs_json() {
 # Pod más reciente del Job de un nodo para un Plan.
 node_pod_json() {
   k -n "$NS" get pods -l "upgrade.cattle.io/plan=$2,upgrade.cattle.io/node=$1" -o json \
-    | jq_ -o json -I0 '[.items[]] | sort_by(.metadata.creationTimestamp) | .[-1] // {}'
+    | jq_ -o json -I0 '[.items[]] | sort_by(.metadata.creationTimestamp) | reverse | .[0] // {}'
 }
+# (".[-1]" sobre una lista vacía es un error en yq, no null: de ahí el reverse.)
 
 # ------------------------------------------------------------------ etcd
 # Pod de etcd en ejecución y listo, evitando el nodo indicado (el que se va a actualizar).
