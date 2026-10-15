@@ -1,0 +1,8 @@
+#!/bin/sh
+for a in "$@"; do p=$a; done
+case "$p" in
+  */boot) free=$(cat "$STUB_STATE/df-boot" 2>/dev/null || echo 1000) ;;
+  *) free=$(cat "$STUB_STATE/df-root" 2>/dev/null || echo 20000) ;;
+esac
+echo "Filesystem 1048576-blocks Used Available Capacity Mounted on"
+echo "/dev/fake 100000 1000 $free 1% /"

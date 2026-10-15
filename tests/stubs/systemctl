@@ -1,0 +1,19 @@
+#!/bin/sh
+# Stub de systemctl: unidades activas = archivos $STUB_STATE/active.<unidad>.
+# shellcheck source=_lib.sh
+. "$(dirname "$0")/_lib.sh"
+record "systemctl $*"
+args=""
+for a in "$@"; do
+  case "$a" in --quiet|--now) ;; *) args="$args $a" ;; esac
+done
+# shellcheck disable=SC2086
+set -- $args
+case "$1" in
+  is-active)
+    if [ -f "$STUB_STATE/active.$2" ]; then echo active; exit 0; fi
+    echo inactive; exit 3 ;;
+  is-enabled) cat "$STUB_STATE/enabled.$2" 2>/dev/null || echo enabled ;;
+  reboot) echo reboot >> "$STUB_STATE/reboots.log" ;;
+esac
+exit 0

@@ -1,0 +1,5 @@
+# Herramientas descargadas por tools/install.sh
+/tools/bin/
+/tools/bats-core/
+# Manifiestos generados (make render)
+/out/

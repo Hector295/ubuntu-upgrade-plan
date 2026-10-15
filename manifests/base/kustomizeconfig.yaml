@@ -1,0 +1,18 @@
+# Enseña a kustomize dónde referencia un Plan (CRD) a Secrets, ConfigMaps e imágenes,
+# para que propague los nombres con hash y el campo "images" de los overlays.
+nameReference:
+  - kind: Secret
+    fieldSpecs:
+      - kind: Plan
+        path: spec/secrets/name
+  - kind: ConfigMap
+    fieldSpecs:
+      - kind: Plan
+        path: spec/prepare/envFrom/configMapRef/name
+      - kind: Plan
+        path: spec/upgrade/envFrom/configMapRef/name
+images:
+  - kind: Plan
+    path: spec/prepare/image
+  - kind: Plan
+    path: spec/upgrade/image

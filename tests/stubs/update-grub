@@ -1,0 +1,28 @@
+#!/bin/sh
+# Stub de update-grub: genera un grub.cfg con el formato de Ubuntu a partir de /boot.
+# shellcheck source=_lib.sh
+. "$(dirname "$0")/_lib.sh"
+record "update-grub"
+fail_if update-grub
+uuid=0123-abcd
+GRUB_DEFAULT=0
+for f in "$ROOT"/etc/default/grub.d/*.cfg; do
+  # shellcheck disable=SC1090
+  [ -e "$f" ] && . "$f"
+done
+cfg="$ROOT/boot/grub/grub.cfg"
+mkdir -p "$(dirname "$cfg")"
+{
+  echo "set default=\"$GRUB_DEFAULT\""
+  echo "menuentry 'Ubuntu' --class ubuntu \$menuentry_id_option 'gnulinux-simple-$uuid' {"
+  echo "}"
+  echo "submenu 'Advanced options for Ubuntu' \$menuentry_id_option 'gnulinux-advanced-$uuid' {"
+  if [ ! -f "$STUB_STATE/grub-no-entries" ]; then
+    for k in $(for f in "$ROOT"/boot/vmlinuz-*; do [ -e "$f" ] && echo "${f##*/vmlinuz-}"; done | sort -rV); do
+      echo "  menuentry 'Ubuntu, with Linux $k' --class ubuntu \$menuentry_id_option 'gnulinux-$k-advanced-$uuid' {"
+      echo "  }"
+    done
+  fi
+  echo "}"
+} > "$cfg"
+exit 0

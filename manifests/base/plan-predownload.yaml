@@ -1,0 +1,29 @@
+# Pre-descarga de paquetes de 24.04 y del kernel. Sin drain, sin cordon y sin reboot:
+# se puede lanzar días antes de la ventana. Nodos: label os-upgrade=predownload.
+apiVersion: upgrade.cattle.io/v1
+kind: Plan
+metadata:
+  name: os-upgrade-predownload
+spec:
+  version: "24.04"
+  concurrency: 2                   # nodos descargando a la vez (cuidado con el proxy)
+  # exclusive en SUC v0.16 = anti-afinidad por nodo: impide que este Job coincida en el
+  # mismo nodo con otro Plan exclusive (p. ej. el de upgrade). No serializa el cluster.
+  exclusive: true
+  jobActiveDeadlineSecs: 3600
+  serviceAccountName: system-upgrade-controller
+  nodeSelector:
+    matchExpressions:
+      - {key: os-upgrade, operator: In, values: ["predownload"]}
+  tolerations:
+    - operator: Exists
+  secrets:
+    - name: os-upgrade-script
+      path: /host/run/system-upgrade/secrets/os-upgrade
+  upgrade:
+    image: docker.io/library/ubuntu:24.04
+    command: ["chroot", "/host"]
+    args: ["sh", "/run/system-upgrade/secrets/os-upgrade/upgrade.sh", "predownload"]
+    envFrom:
+      - configMapRef:
+          name: os-upgrade-config

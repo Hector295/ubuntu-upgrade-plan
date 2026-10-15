@@ -1,0 +1,7 @@
+#!/bin/sh
+# shellcheck source=_lib.sh
+. "$(dirname "$0")/_lib.sh"
+record "do-release-upgrade $*"
+fail_if do-release-upgrade
+sed -i "s/^VERSION_ID=.*/VERSION_ID=\"${TARGET_VERSION:-24.04}\"/" "$ROOT/etc/os-release"
+exit 0

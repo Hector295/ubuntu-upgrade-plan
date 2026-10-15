@@ -1,0 +1,11 @@
+#!/bin/sh
+# shellcheck source=_lib.sh
+. "$(dirname "$0")/_lib.sh"
+record "apt-mark $*"
+sub=$1
+shift
+case "$sub" in
+  hold) for p in "$@"; do grep -qx "$p" "$STUB_STATE/held" 2>/dev/null || echo "$p" >> "$STUB_STATE/held"; done ;;
+  manual) for p in "$@"; do echo "$p" >> "$STUB_STATE/manual"; done ;;
+esac
+exit 0

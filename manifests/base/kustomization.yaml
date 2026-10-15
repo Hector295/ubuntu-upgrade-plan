@@ -1,0 +1,26 @@
+# Base común a todos los clusters. No editar para un cluster concreto: crear un overlay
+# en manifests/overlays/<cluster> (ver docs/configuracion.md).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: cattle-system
+
+resources:
+  - plan-predownload.yaml
+  - plan-upgrade-workers.yaml
+  - plan-upgrade-cp.yaml
+
+configurations:
+  - kustomizeconfig.yaml
+
+# El script y la configuración llevan un hash en el nombre: cualquier cambio genera un
+# Secret/ConfigMap nuevo y, con él, un Plan nuevo. Así cada nodo usa una versión conocida.
+secretGenerator:
+  - name: os-upgrade-script
+    files:
+      - upgrade.sh=../../scripts/upgrade.sh
+
+configMapGenerator:
+  - name: os-upgrade-config
+    envs:
+      - config.env

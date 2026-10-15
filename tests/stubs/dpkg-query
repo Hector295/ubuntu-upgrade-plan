@@ -1,0 +1,30 @@
+#!/bin/sh
+# Stub de dpkg-query: soporta -W -f='${Status}' pkg y -W -f='${db:Status-Abbrev} ${Package}\n' patrones...
+# shellcheck source=_lib.sh
+. "$(dirname "$0")/_lib.sh"
+fmt=""
+pats=""
+for a in "$@"; do
+  case "$a" in
+    -W) ;;
+    -f=*) fmt=${a#-f=} ;;
+    *) pats="$pats $a" ;;
+  esac
+done
+set -f
+case "$fmt" in
+  *db:Status-Abbrev*)
+    found=1
+    while read -r pkg; do
+      for pat in $pats; do
+        # shellcheck disable=SC2254
+        case "$pkg" in $pat) echo "ii  $pkg"; found=0; break ;; esac
+      done
+    done < "$STUB_STATE/installed"
+    exit $found ;;
+  *)
+    # shellcheck disable=SC2086
+    set -- $pats
+    if installed "$1"; then printf 'install ok installed'; exit 0; fi
+    exit 1 ;;
+esac

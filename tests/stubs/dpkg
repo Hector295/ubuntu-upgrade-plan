@@ -1,0 +1,10 @@
+#!/bin/sh
+# shellcheck source=_lib.sh
+. "$(dirname "$0")/_lib.sh"
+record "dpkg $*"
+case "$1" in
+  --print-architecture) echo amd64 ;;
+  --audit) cat "$STUB_STATE/dpkg-audit" 2>/dev/null ;;
+  --configure) fail_if dpkg-configure ;;
+esac
+exit 0

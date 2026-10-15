@@ -1,0 +1,44 @@
+# Upgrade de control plane (CP+etcd y nodos con todos los roles). Label os-upgrade=upgrade.
+# Orden del Job: prepare (preflight, ANTES del drain) -> drain -> upgrade (1 reboot).
+apiVersion: upgrade.cattle.io/v1
+kind: Plan
+metadata:
+  name: os-upgrade-cp
+spec:
+  version: "24.04"
+  concurrency: 1
+  exclusive: true                  # ver nota en plan-predownload.yaml
+  jobActiveDeadlineSecs: 7200      # por nodo, drain y reboot incluidos
+  postCompleteDelay: 10m           # margen para que etcd se estabilice antes del siguiente
+  serviceAccountName: system-upgrade-controller
+  nodeSelector:
+    matchExpressions:
+      - {key: os-upgrade, operator: In, values: ["upgrade"]}
+      - {key: node-role.kubernetes.io/control-plane, operator: In, values: ["true"]}
+  tolerations:
+    - operator: Exists
+  secrets:
+    - name: os-upgrade-script
+      path: /host/run/system-upgrade/secrets/os-upgrade
+  prepare:
+    image: docker.io/library/ubuntu:24.04
+    command: ["chroot", "/host"]
+    args: ["sh", "/run/system-upgrade/secrets/os-upgrade/upgrade.sh", "prepare"]
+    envFrom:
+      - configMapRef:
+          name: os-upgrade-config
+    securityContext:
+      privileged: true             # SUC solo da privilegios por defecto al contenedor upgrade
+  # Sin drain.timeout: en SUC v0.16 son nanosegundos en int32 (máx. ~2 s) y rompe el
+  # controller. El drain con timeout lo hará rollout.sh (iteración 2).
+  drain:
+    force: false
+    ignoreDaemonSets: true
+    deleteEmptydirData: true
+  upgrade:
+    image: docker.io/library/ubuntu:24.04
+    command: ["chroot", "/host"]
+    args: ["sh", "/run/system-upgrade/secrets/os-upgrade/upgrade.sh", "upgrade"]
+    envFrom:
+      - configMapRef:
+          name: os-upgrade-config

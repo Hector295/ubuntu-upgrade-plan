@@ -1,0 +1,18 @@
+# Cluster lab. Para un cluster nuevo: copiar este directorio y editar config.env.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+configMapGenerator:
+  - name: os-upgrade-config
+    behavior: merge
+    envs:
+      - config.env
+
+# Registry privado para la imagen de los Jobs (solo necesita sh y chroot):
+# images:
+#   - name: docker.io/library/ubuntu
+#     newName: registry.interno.local/library/ubuntu
+#     newTag: "24.04"

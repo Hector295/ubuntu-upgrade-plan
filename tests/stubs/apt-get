@@ -1,0 +1,49 @@
+#!/bin/sh
+# Stub de apt-get: registra la llamada y simula efectos sobre $STUB_STATE/installed y $ROOT/boot.
+# shellcheck source=_lib.sh
+. "$(dirname "$0")/_lib.sh"
+record "apt-get $*"
+if [ -n "${http_proxy:-}" ]; then record "env http_proxy=$http_proxy https_proxy=${https_proxy:-} no_proxy=${no_proxy:-}"; fi
+sub="" pkgs="" simulate=false download_only=false
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) shift ;;
+    -s) simulate=true ;;
+    -d|--download-only) download_only=true ;;
+    -*) ;;
+    *) if [ -z "$sub" ]; then sub=$1; else pkgs="$pkgs $1"; fi ;;
+  esac
+  shift
+done
+case "$sub" in
+  update) fail_if apt-update ;;
+  full-upgrade)
+    if $simulate; then cat "$STUB_STATE/apt-sim" 2>/dev/null; exit 0; fi
+    if $download_only; then fail_if apt-download-full; exit 0; fi
+    fail_if apt-full-upgrade
+    if [ -f "$STUB_STATE/full-upgrade-reboot-pkgs" ]; then
+      cp "$STUB_STATE/full-upgrade-reboot-pkgs" "$ROOT/run/reboot-required.pkgs"
+    fi ;;
+  download)
+    fail_if apt-download
+    for p in $pkgs; do : > "${p}_1.0_amd64.deb"; done ;;
+  install)
+    fail_if apt-install
+    for p in $pkgs; do
+      add_installed "$p"
+      case "$p" in
+        linux-image-*)
+          v=${p#linux-image-}
+          echo kernel > "$ROOT/boot/vmlinuz-$v"
+          echo initrd > "$ROOT/boot/initrd.img-$v" ;;
+      esac
+    done ;;
+  remove|purge)
+    for p in $pkgs; do
+      del_installed "$p"
+      case "$p" in
+        linux-image-*) v=${p#linux-image-}; rm -f "$ROOT/boot/vmlinuz-$v" "$ROOT/boot/initrd.img-$v" ;;
+      esac
+    done ;;
+esac
+exit 0
