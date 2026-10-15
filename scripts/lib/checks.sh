@@ -84,6 +84,20 @@ check_os_upgrade_idle() {
   fi
 }
 
+# Para preflight: un nodo a medias de una campaña anterior no impide empezar (rollout.sh lo
+# retoma antes que los demás), pero hay que saberlo.
+check_os_upgrade_in_progress() {
+  busy=""
+  for p in "$PLAN_WORKERS" "$PLAN_CP"; do
+    for n in $(plan_applying "$p"); do busy="$busy $n"; done
+  done
+  if [ -n "$busy" ]; then
+    warn_check "nodos con upgrade en curso (rollout.sh los retoma antes que los demás):$busy"
+  else
+    ok "ningún nodo en upgrade"
+  fi
+}
+
 check_nodes_ready() {
   bad=$(nodes_json | jq_ '.items[] | select([.status.conditions[] | select(.type == "Ready" and .status == "True")] | length == 0) | .metadata.name')
   if [ -n "$bad" ]; then

@@ -94,6 +94,13 @@ setup() {
   [[ "$output" == *"[AVISO] PDBs sin interrupciones permitidas"*"app/web"* ]]
 }
 
+@test "preflight: un nodo con upgrade en curso es un aviso, no un fallo" {
+  set_applying os-upgrade-cp cp2
+  run sh "$PREFLIGHT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[AVISO] nodos con upgrade en curso (rollout.sh los retoma antes que los demás): cp2"* ]]
+}
+
 @test "preflight: Plans de os-upgrade no aplicados" {
   echo '{"items":[]}' > "$K8S/plans.json"
   run sh "$PREFLIGHT"

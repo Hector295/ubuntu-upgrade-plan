@@ -36,7 +36,7 @@ check_api || { echo "Sin acceso al cluster: no se puede seguir."; exit 1; }
 check_suc || true
 check_plans || true
 check_rancher_plans_idle || true
-check_os_upgrade_idle "" || true
+check_os_upgrade_in_progress
 check_nodes_ready || true
 check_etcd "" || true
 check_snapshot || true
