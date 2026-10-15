@@ -501,10 +501,12 @@ cmd_predownload() {
   info "Pre-descarga completada."
 }
 
+# Estado real de cada nodo:
+#   UPGRADE      ok (24.04 con el KERNEL_VERSION actual) | en curso (os-upgrade=upgrade) | no
+#   PREDESCARGA  ok (versión actual del Plan) | anterior (otra versión) | no | - (ya actualizado)
 cmd_status() {
   hp=$(plan_hash "$PLAN_PREDOWNLOAD" 2>/dev/null || true)
-  hw=$(plan_hash "$PLAN_WORKERS" 2>/dev/null || true)
-  hc=$(plan_hash "$PLAN_CP" 2>/dev/null || true)
+  kernel=$(config_value KERNEL_VERSION 2>/dev/null || true)
   wanted=" $(selected_nodes | tr '\n' ' ') "
   printf '%-28s %-6s %-6s %-12s %-11s %-8s %-20s %-24s %s\n' NODO ROL GRUPO OS-UPGRADE PREDESCARGA UPGRADE SO KERNEL ESTADO
   nodes_json | jq_ "
@@ -514,18 +516,25 @@ cmd_status() {
       .metadata.labels[\"os-upgrade-group\"] // \"-\",
       .metadata.labels[\"os-upgrade\"] // \"-\",
       .metadata.labels[\"plan.upgrade.cattle.io/$PLAN_PREDOWNLOAD\"] // \"-\",
-      .metadata.labels[\"plan.upgrade.cattle.io/$PLAN_WORKERS\"] // .metadata.labels[\"plan.upgrade.cattle.io/$PLAN_CP\"] // \"-\",
       (.status.nodeInfo.osImage | sub(\" LTS\", \"\") | sub(\" \", \"_\")),
       .status.nodeInfo.kernelVersion,
       ([.status.conditions[] | select(.type == \"Ready\") | .status][0] // \"Unknown\"),
       ((.spec.unschedulable // false) | tostring)
-    ] | join(\" \")" | while read -r name cp group state ph uh os kv ready unsched; do
+    ] | join(\" \")" | while read -r name cp group state ph os kv ready unsched; do
       case "$wanted" in *" $name "*) ;; *) continue ;; esac
       role="worker"; [ "$cp" != true ] || role="cp"
       [ "$ready" = True ] && ready=Ready || ready=NotReady
       cordon=""; [ "$unsched" != true ] || cordon=cordon
-      pd="no"; [ "$ph" = "-" ] || { [ "$ph" = "$hp" ] && pd="ok" || pd="antigua"; }
-      ud="no"; [ "$uh" = "-" ] || { { [ "$uh" = "$hw" ] || [ "$uh" = "$hc" ]; } && ud="ok" || ud="antiguo"; }
+      case "$os" in
+        *24.04*) [ -n "$kernel" ] && [ "$kv" = "$kernel" ] && ud="ok" || ud="no" ;;
+        *) ud="no" ;;
+      esac
+      [ "$ud" = ok ] || [ "$state" != upgrade ] || ud="en curso"
+      if [ "$ud" = ok ]; then pd="-"
+      elif [ "$ph" = "-" ]; then pd="no"
+      elif [ "$ph" = "$hp" ]; then pd="ok"
+      else pd="anterior"
+      fi
       printf '%-28s %-6s %-6s %-12s %-11s %-8s %-20s %-24s %s\n' "$name" "$role" "$group" "$state" "$pd" "$ud" "$os" "$kv" "$ready${cordon:+,$cordon}"
     done
 }

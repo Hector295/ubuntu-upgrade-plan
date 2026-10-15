@@ -263,14 +263,27 @@ EOF2
   [[ "$output" == *"w1: la pre-descarga falló"* ]]
 }
 
-@test "status: tabla de nodos con su estado" {
+@test "status: estado real de cada nodo, no el hash de la versión de los Plans" {
+  # w1: actualizado en una campaña anterior (hash antiguo) -> ok.
   set_label w1 os-upgrade done
-  set_label w1 plan.upgrade.cattle.io/os-upgrade-workers "$H_W"
-  set_label w1 plan.upgrade.cattle.io/os-upgrade-predownload "$H_PRE"
-  run sh "$ROLLOUT" status --group 1
+  set_label w1 plan.upgrade.cattle.io/os-upgrade-workers viejo
+  y -i -p json -o json "(.items[] | select(.metadata.name == \"w1\")) |= ($(upgraded_expr os-upgrade-workers viejo))" "$K8S/nodes.json"
+  # w2: en curso, con la pre-descarga de la versión actual.
+  set_label w2 os-upgrade upgrade
+  set_label w2 plan.upgrade.cattle.io/os-upgrade-predownload "$H_PRE"
+  # cp1: pre-descarga de una versión anterior.
+  set_label cp1 plan.upgrade.cattle.io/os-upgrade-predownload viejo
+  run sh "$ROLLOUT" status
   [ "$status" -eq 0 ]
   [[ "$output" == *"NODO"*"PREDESCARGA"* ]]
-  echo "$output" | grep -Eq '^w1 +worker +1 +done +ok +ok '
-  echo "$output" | grep -Eq '^w2 +worker +1 +- +no +no '
-  ! echo "$output" | grep -q '^cp1'
+  echo "$output" | grep -Eq '^w1 +worker +1 +done +- +ok +Ubuntu_24.04.3 +6.8.0-139-generic +Ready'
+  echo "$output" | grep -Eq '^w2 +worker +1 +upgrade +ok +en curso '
+  echo "$output" | grep -Eq '^cp1 +cp +3 +- +anterior +no '
+  echo "$output" | grep -Eq '^cp2 +cp +3 +- +no +no '
+}
+
+@test "status: un nodo en 24.04 con otro kernel no figura como actualizado" {
+  y -i -p json -o json "(.items[] | select(.metadata.name == \"w1\")) |= ($(upgraded_expr os-upgrade-workers "$H_W" 6.8.0-147-generic))" "$K8S/nodes.json"
+  run sh "$ROLLOUT" status --nodes w1
+  echo "$output" | grep -Eq '^w1 +worker +1 +- +no +no +Ubuntu_24.04.3 +6.8.0-147-generic'
 }
