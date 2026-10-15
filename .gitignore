@@ -3,3 +3,4 @@
 /tools/bats-core/
 # Manifiestos generados (make render)
 /out/
+/.lab/

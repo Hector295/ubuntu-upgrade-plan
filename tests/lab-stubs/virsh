@@ -1,0 +1,14 @@
+#!/bin/sh
+# Stub de virsh: dominios en $VIRSH_STATE/domains, volúmenes en $VIRSH_STATE/vols.
+echo "virsh $*" >> "$VIRSH_STATE/calls.log"
+has() { grep -qx "$2" "$VIRSH_STATE/$1" 2>/dev/null; }
+del() { grep -vx "$2" "$VIRSH_STATE/$1" > "$VIRSH_STATE/$1.tmp" || true; mv "$VIRSH_STATE/$1.tmp" "$VIRSH_STATE/$1"; }
+case "$1" in
+  dominfo|domstate) has domains "$2" ;;
+  destroy) has domains "$2" ;;
+  undefine) has domains "$2" && del domains "$2" ;;
+  vol-info) has vols "$4" ;;
+  vol-delete) has vols "$4" && del vols "$4" ;;
+  domifaddr) echo " vnet0  52:54:00:00:00:01  ipv4  192.168.122.10/24" ;;
+  *) exit 0 ;;
+esac

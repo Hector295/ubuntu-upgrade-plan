@@ -3,7 +3,7 @@ TOOLS   := tools/bin
 OUT     := out
 KUSTOMIZE_BUILD := $(TOOLS)/kustomize build --load-restrictor LoadRestrictionsNone
 
-SHELL_SCRIPTS := scripts/*.sh scripts/lib/*.sh tools/install.sh tests/stubs/* tests/k8s-stubs/* docs/ejemplos/*.sh $(wildcard manifests/overlays/*/post-upgrade-hook.sh)
+SHELL_SCRIPTS := scripts/*.sh scripts/lib/*.sh lab/*.sh tools/install.sh tests/stubs/* tests/k8s-stubs/* tests/lab-stubs/* docs/ejemplos/*.sh $(wildcard manifests/overlays/*/post-upgrade-hook.sh)
 
 .PHONY: help tools lint test render validate check clean
 
