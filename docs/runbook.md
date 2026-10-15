@@ -220,14 +220,23 @@ kubectl -n $NS logs -l upgrade.cattle.io/node=N -c prepare
 kubectl -n $NS logs -l upgrade.cattle.io/node=N -c upgrade -f
 ```
 
-Durante el release upgrade, el pod solo dice `Release upgrade en curso`. El detalle está en el nodo:
+Los logs del pod marcan cada paso (`PASO 1/7` ... `PASO 7/7`). Durante el release upgrade, el
+pod solo dice `Release upgrade en curso`. El detalle está en el nodo:
 
 ```sh
 journalctl -fu os-upgrade-release          # unidad del host
-tail -f /var/log/os-upgrade.log            # log de todas las fases (persiste entre reboots)
+tail -f /var/log/os-upgrade.log            # todas las fases, una línea ts=... node=... phase=... level=... msg="..."
+grep 'level=WARN\|level=ERROR' /var/log/os-upgrade.log
 tail -f /var/log/dist-upgrade/main.log     # log del upgrader de Ubuntu
-sh /usr/local/sbin/os-upgrade.sh status    # resumen del estado
+sh /usr/local/sbin/os-upgrade.sh status    # resumen del estado (incluye el informe final)
 ```
+
+Al terminar, cada nodo guarda un informe en `/var/log/os-upgrade-report.txt`:
+- duración y número de reboots;
+- versiones de sistema y kernel;
+- resultado del hook;
+- fuentes de apt que el upgrade desactivó;
+- paquetes retenidos.
 
 ### 5.3 Comprobar que terminó
 
@@ -395,6 +404,8 @@ Si `/usr/local/sbin/os-upgrade.sh` aún no existe, el fallo fue antes de copiarl
 | `el nodo necesitaría un reboot previo por: ...` | Ver paso 2. Parchear y reiniciar el nodo en la ventana de parches |
 | `espacio libre insuficiente en ...` | Liberar espacio (`apt-get clean`, kernels viejos, logs) |
 | `apt-get update falló` | Proxy o mirror: revisar `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` |
+| `el mirror de Ubuntu del nodo (...) no es un mirror público` | Mirror interno con `ALLOW_THIRD_PARTY=false`: el upgrade lo cambiaría a `archive.ubuntu.com`. Usar `ALLOW_THIRD_PARTY=true` ([configuracion.md](configuracion.md#fuentes-de-apt-mirror-interno-y-repos-de-terceros)) |
+| `el hook post-upgrade tiene errores de sintaxis` | Corregir `post-upgrade-hook.sh` del overlay, `make validate` y `kubectl apply` |
 | `KERNEL_VERSION ...` | Configuración del overlay; corregir, `make validate` y `kubectl apply` |
 
 Para reintentar tras arreglarlo: `kubectl -n $NS delete job <job>`. Para dejar el nodo para más
@@ -432,8 +443,20 @@ sh /usr/local/sbin/os-upgrade.sh status
   servidor.
 - **`dpkg --audit reporta paquetes a medio instalar`:** `dpkg --configure -a`, revisar y
   `reset-failed`.
+- **`el hook post-upgrade falló N veces`:** el nodo ya está en 24.04 con el kernel fijado, pero
+  la comprobación propia no pasa. Su salida está en `grep 'msg="hook:' /var/log/os-upgrade.log`.
+  Arreglar la causa en el nodo, `reset-failed` y borrar el Job: el siguiente intento solo cierra
+  (vuelve a ejecutar el hook, sin reboot).
 - **Abandonar el nodo por ahora:** `kubectl label node N os-upgrade-`, borrar el Job y
   `kubectl uncordon N` **solo si** `systemctl is-active os-upgrade-release` dice `inactive`.
+
+### Fuentes de apt desactivadas tras el upgrade
+
+Aviso `fuentes desactivadas por el upgrade` (también en el informe del nodo): el upgrader las
+comentó (`# ... disabled on upgrade to noble` en `.list`) o les puso `Enabled: no` (en
+`.sources`) porque no publican `noble` o porque `ALLOW_THIRD_PARTY=false`. No impide terminar.
+Si hacen falta, comprobar que el proveedor tiene paquetes para 24.04 y reactivarlas a mano
+cambiando `jammy` por `noble`.
 
 ### `rke2 no está activo tras el upgrade`
 

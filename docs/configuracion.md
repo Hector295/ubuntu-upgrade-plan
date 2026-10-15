@@ -29,9 +29,64 @@ Solo hace falta escribir los que cambian respecto al valor por defecto
 | `MIN_FREE_ROOT_MB` | `5000` | Espacio libre mínimo en `/` |
 | `MIN_FREE_BOOT_MB` | `300` | Espacio libre mínimo en `/boot` |
 | `MAX_REBOOTS` | `3` | Tope de reboots del proceso en un nodo; al superarlo el nodo queda marcado como fallido. Lo normal es 1 |
+| `ALLOW_THIRD_PARTY` | `true` | Ejecuta `do-release-upgrade --allow-third-party`. Ver [Fuentes de apt](#fuentes-de-apt-mirror-interno-y-repos-de-terceros) |
+| `POST_UPGRADE_HOOK_RETRIES` | `3` | Intentos del [hook post-upgrade](#hook-post-upgrade) (20 s entre intentos) antes de marcar el nodo |
 
 El proxy se exporta a apt, a `do-release-upgrade` y a la unidad systemd del host. Si los nodos
 ya tienen el proxy configurado en apt (`Acquire::http::Proxy`), no hace falta repetirlo aquí.
+
+## Fuentes de apt: mirror interno y repos de terceros
+
+`do-release-upgrade` solo reconoce como válidos los mirrors públicos de Ubuntu (su lista
+`mirrors.cfg`). Sin `--allow-third-party`, cualquier otra fuente se **desactiva** con el
+comentario `disabled on upgrade to noble`, y eso incluye un **mirror interno de Ubuntu**, que
+además se sustituye por `archive.ubuntu.com`. Con `--allow-third-party`, el upgrader comprueba
+cada fuente: si publica `noble`, la reescribe a `noble`; si no, la desactiva.
+
+| `ALLOW_THIRD_PARTY` | Mirror interno de Ubuntu | Repos de proveedores |
+|---|---|---|
+| `true` (por defecto) | Se mantiene (si publica `noble`) | Se mantienen los que publican `noble`; los demás se desactivan |
+| `false` | `prepare` **falla antes del drain**: el upgrade lo cambiaría a `archive.ubuntu.com` | Se desactivan todos |
+
+En cada nodo, `prepare` y la pre-descarga registran las fuentes no oficiales que encuentran
+(formatos `.list` y `.sources`) y cómo se tratarán. Al terminar, las fuentes que el upgrade
+haya desactivado salen como aviso y en el informe del nodo (`/var/log/os-upgrade-report.txt`).
+Reactivarlas es manual: hay que comprobar que el proveedor publica paquetes para 24.04.
+
+`prepare` y la pre-descarga también avisan de los paquetes retenidos con `apt-mark hold`
+(aparte del kernel fijado), porque pueden impedir que `do-release-upgrade` calcule el upgrade.
+
+## Hook post-upgrade
+
+Script propio que se ejecuta en cada nodo **al final** del proceso, como root en el host, con
+el sistema ya en 24.04, el kernel fijado arrancado y rke2 activo. Sirve para comprobaciones
+del entorno que la herramienta no conoce: montajes, servicios propios, drivers de GPU, agentes
+de monitorización, etc.
+
+- Recibe `NODE_NAME`, `KERNEL_VERSION` y `TARGET_VERSION`. Su salida va al log del nodo.
+- Si falla, se reintenta (`POST_UPGRADE_HOOK_RETRIES`, 20 s entre intentos). Si sigue
+  fallando, el nodo queda **marcado como fallido y cordoneado**: el sistema está actualizado,
+  pero algo propio no funciona.
+- Su sintaxis se comprueba en `make validate` y en `prepare` (antes del drain), y pasa por
+  shellcheck en `make lint`.
+
+Para activarlo en un cluster, partir del ejemplo `docs/ejemplos/post-upgrade-hook.sh`:
+
+```sh
+cp docs/ejemplos/post-upgrade-hook.sh manifests/overlays/<cluster>/
+```
+
+y añadir al `kustomization.yaml` del overlay:
+
+```yaml
+secretGenerator:
+  - name: os-upgrade-script
+    behavior: merge
+    files:
+      - post-upgrade-hook.sh
+```
+
+El hook viaja en el mismo Secret que `upgrade.sh`: cambiarlo genera un Secret y unos Plans nuevos.
 
 ## Ajustes de los Plans (`kustomization.yaml`)
 
@@ -105,6 +160,7 @@ dos de estos Jobs coincidan **en el mismo nodo**; no serializa el cluster).
 - Una imagen no lleva tag explícito.
 - `KERNEL_VERSION` falta o tiene formato inválido; booleanos o números incorrectos;
   proxy o mirror sin `http://`/`https://`.
+- El hook post-upgrade tiene errores de sintaxis.
 - Los recursos quedan en namespaces distintos.
 
 Si actualizáis Rancher, volved a exportar el CRD:

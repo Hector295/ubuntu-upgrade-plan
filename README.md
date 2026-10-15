@@ -14,6 +14,10 @@ Qué hace en cada nodo:
 - Descarga previa de paquetes, sin drain, días antes de la ventana: la ventana no depende de la red.
 - Preflight antes del drain: si el nodo no puede actualizarse, falla sin cordonearlo.
 - Idempotente: cada reboot mata el pod, el Job crea otro y el proceso continúa donde quedó.
+- Mantiene el mirror interno y los repos de terceros que publican 24.04
+  (`--allow-third-party`) y avisa de los que se desactivan.
+- Hook post-upgrade opcional por cluster para comprobaciones propias, e informe final en cada
+  nodo (`/var/log/os-upgrade-report.txt`).
 
 ## Requisitos
 
