@@ -48,6 +48,10 @@ ya tienen el proxy configurado en apt (`Acquire::http::Proxy`), no hace falta re
 - **26.04 no tiene `linux-modules-extra`:** su contenido se integró en `linux-modules`. Los
   módulos de ZFS van en un paquete aparte que el metapaquete instala por defecto, y la
   herramienta también lo instala.
+- **Probado en el lab** (3 control plane + 1 worker, RKE2 v1.33.13+rke2r2): 24.04 → 26.04.1 con
+  `7.0.0-38-generic`, un reboot por nodo. El upgrade conserva `initramfs-tools` (no cambia a
+  dracut) y RKE2 v1.33 funciona sobre 26.04. Para producción, confirmar además la matriz de
+  soporte de vuestra versión de RKE2.
 - **Un nodo dos LTS por detrás** (22.04 con `TARGET_VERSION=26.04`) se rechaza en `prepare`,
   antes del drain: primero una campaña a 24.04 y después otra a 26.04.
 - **Un nodo que ya está en la versión destino** solo cambia de kernel.
