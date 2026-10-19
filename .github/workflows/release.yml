@@ -1,0 +1,43 @@
+# On a v* tag: checks, release tarball on GitHub Releases and image on ghcr.io.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  IMAGE: ghcr.io/hector295/os-upgrade
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: lint + test + validate
+        run: make check
+
+      - name: tarball
+        run: make dist VERSION="${GITHUB_REF_NAME#v}"
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+            --title "os-upgrade $GITHUB_REF_NAME" \
+            dist/os-upgrade-*-linux-amd64.tar.gz dist/os-upgrade-*-linux-amd64.tar.gz.sha256
+
+      - name: image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build --build-arg VERSION="$version" -t "$IMAGE:$version" -t "$IMAGE:latest" .
+          docker push "$IMAGE:$version"
+          docker push "$IMAGE:latest"

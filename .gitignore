@@ -1,6 +1,7 @@
 # Tools downloaded by tools/install.sh
 /tools/bin/
 /tools/bats-core/
-# Generated manifests (make render) and local lab state
+# Generated manifests (make render), release builds (make dist) and local lab state
 /out/
 /.lab/
+/dist/

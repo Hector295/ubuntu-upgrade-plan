@@ -1,0 +1,180 @@
+#!/bin/sh
+# Single entry point of the tool, the same from the repo, the release tarball and the image.
+#
+# Usage:
+#   os-upgrade init <dir> --kernel <X.Y.Z-N-generic> [--target 24.04|26.04]
+#                                 creates a cluster overlay (kustomization.yaml + config.env)
+#   os-upgrade export-crd <dir>   saves the cluster's Plan CRD in <dir>/crd-plans.json
+#   os-upgrade render <dir> [-o <file>|-]
+#                                 renders the overlay (default output: <dir>/manifests.yaml)
+#   os-upgrade validate <dir>     render + validation against <dir>/crd-plans.json
+#   os-upgrade apply <dir> [--yes]
+#                                 validate + kubectl apply, after confirming the context
+#   os-upgrade preflight ...      cluster checks before a campaign (read-only)
+#   os-upgrade rollout ...        predownload, node-by-node upgrade, status
+#   os-upgrade check              detailed state of nodes, etcd, Jobs and pods
+#   os-upgrade version
+#
+# <dir> is a cluster overlay: the same format as manifests/overlays/<cluster> in the repo
+# (it refers to the base as ../../base). The cluster configuration lives outside the package.
+# Help for preflight/rollout: os-upgrade rollout --help.
+set -eu
+
+PKG_DIR=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+SCRIPTS="$PKG_DIR/scripts"
+TOOLS_BIN="$PKG_DIR/tools/bin"
+KUBECTL="${KUBECTL:-kubectl}"
+
+# Help to stdout when asked for, to stderr on a usage error (it may run inside $(...)).
+usage() {
+  if [ "${1:-2}" -eq 0 ]; then
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+  else
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2
+  fi
+  exit "${1:-2}"
+}
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+version() {
+  if [ -f "$PKG_DIR/VERSION" ]; then
+    cat "$PKG_DIR/VERSION"
+  else
+    git -C "$PKG_DIR" describe --tags --always --dirty 2>/dev/null || echo dev
+  fi
+}
+
+overlay_dir() {
+  [ -n "${1:-}" ] || usage
+  [ -f "$1/kustomization.yaml" ] || die "$1/kustomization.yaml does not exist (create it with: os-upgrade init $1 --kernel ...)"
+  cd "$1" && pwd
+}
+
+cmd_init() {
+  dir=""
+  kernel=""
+  target=24.04
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --kernel) [ $# -ge 2 ] || usage; kernel=$2; shift 2 ;;
+      --target) [ $# -ge 2 ] || usage; target=$2; shift 2 ;;
+      -*) usage ;;
+      *) [ -z "$dir" ] || usage; dir=$1; shift ;;
+    esac
+  done
+  [ -n "$dir" ] || usage
+  [ -n "$kernel" ] || die "--kernel is required (e.g. --kernel 6.8.0-139-generic); see docs/kernel.md"
+  [ ! -e "$dir/kustomization.yaml" ] || die "$dir/kustomization.yaml already exists"
+
+  mkdir -p "$dir"
+  cp "$PKG_DIR/manifests/overlays/lab/kustomization.yaml" "$dir/kustomization.yaml"
+  sed -i "1s/.*/# Cluster overlay created by os-upgrade init. Parameters: config.env (docs\/configuration.md)./" \
+    "$dir/kustomization.yaml"
+  cat > "$dir/config.env" <<EOF
+# Only the parameters that differ from the defaults (docs/configuration.md).
+TARGET_VERSION=$target
+KERNEL_VERSION=$kernel
+EOF
+  echo "Created $dir/kustomization.yaml and $dir/config.env"
+  echo "Next: os-upgrade export-crd $dir && os-upgrade validate $dir"
+}
+
+cmd_export_crd() {
+  [ $# -eq 1 ] || usage
+  [ -d "$1" ] || die "$1 does not exist"
+  context=$("$KUBECTL" config current-context) || die "kubectl has no current context"
+  "$KUBECTL" get crd plans.upgrade.cattle.io -o json > "$1/crd-plans.json.tmp" \
+    || { rm -f "$1/crd-plans.json.tmp"; die "could not read the Plan CRD from context '$context'"; }
+  mv "$1/crd-plans.json.tmp" "$1/crd-plans.json"
+  echo "Saved $1/crd-plans.json (context '$context')"
+}
+
+# Renders the overlay in <dir> on top of a copy of the package base, so that the overlay
+# does not depend on where the package is installed.
+render() {
+  dir=$1
+  out=$2
+  work=$(mktemp -d)
+  trap 'rm -rf "$work"' EXIT
+  mkdir -p "$work/scripts" "$work/manifests/overlays"
+  cp "$SCRIPTS/upgrade.sh" "$work/scripts/"
+  cp -R "$PKG_DIR/manifests/base" "$PKG_DIR/manifests/components" "$work/manifests/"
+  cp -R "$dir" "$work/manifests/overlays/cluster"
+  {
+    echo "# Rendered by os-upgrade $(version) from $dir"
+    "$TOOLS_BIN/kustomize" build --load-restrictor LoadRestrictionsNone "$work/manifests/overlays/cluster"
+  } > "$work/out.yaml"
+  if [ "$out" = - ]; then
+    cat "$work/out.yaml"
+  else
+    mv "$work/out.yaml" "$out"
+  fi
+  rm -rf "$work"
+  trap - EXIT
+}
+
+cmd_render() {
+  dir=""
+  out=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -o) [ $# -ge 2 ] || usage; out=$2; shift 2 ;;
+      -*) usage ;;
+      *) [ -z "$dir" ] || usage; dir=$1; shift ;;
+    esac
+  done
+  dir=$(overlay_dir "$dir")
+  out=${out:-$dir/manifests.yaml}
+  render "$dir" "$out"
+  [ "$out" = - ] || echo "Generated $out" >&2
+}
+
+cmd_validate() {
+  [ $# -eq 1 ] || usage
+  dir=$(overlay_dir "$1")
+  render "$dir" "$dir/manifests.yaml"
+  TOOLS_BIN="$TOOLS_BIN" sh "$SCRIPTS/validate-manifests.sh" "$dir/manifests.yaml" "$dir"
+}
+
+cmd_apply() {
+  dir=""
+  yes=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --yes) yes=true; shift ;;
+      -*) usage ;;
+      *) [ -z "$dir" ] || usage; dir=$1; shift ;;
+    esac
+  done
+  cmd_validate "$dir"
+  dir=$(overlay_dir "$dir")
+  context=$("$KUBECTL" config current-context) || die "kubectl has no current context"
+  if [ "$yes" != true ]; then
+    printf 'Apply %s to context "%s"? [y/N] ' "$dir/manifests.yaml" "$context" >&2
+    answer=""
+    read -r answer < "${CONFIRM_TTY:-/dev/tty}" 2>/dev/null || answer=""
+    case "$answer" in y|Y|yes|YES) ;; *) die "aborted, nothing applied" ;; esac
+  fi
+  "$KUBECTL" apply -f "$dir/manifests.yaml"
+}
+
+[ $# -ge 1 ] || usage
+command=$1
+shift
+case "$command" in
+  init) cmd_init "$@" ;;
+  export-crd) cmd_export_crd "$@" ;;
+  render) cmd_render "$@" ;;
+  validate) cmd_validate "$@" ;;
+  apply) cmd_apply "$@" ;;
+  preflight) exec sh "$SCRIPTS/preflight.sh" "$@" ;;
+  rollout) exec sh "$SCRIPTS/rollout.sh" "$@" ;;
+  check) exec sh "$SCRIPTS/check-cluster.sh" "$@" ;;
+  version|--version) version ;;
+  help|-h|--help) usage 0 ;;
+  *) echo "Unknown command: $command" >&2; usage ;;
+esac

@@ -1,0 +1,4 @@
+# Only the dist tree and kubectl go into the image.
+*
+!dist/os-upgrade
+!tools/bin/kubectl
