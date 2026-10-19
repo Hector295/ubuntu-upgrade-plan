@@ -21,6 +21,8 @@
 #   LAB_RKE2_VERSION=v1.33.13+rke2r2 (empty: use the LAB_RKE2_CHANNEL channel, e.g. v1.33)
 #   LAB_POOL=default LAB_NET=default LIBVIRT_DEFAULT_URI=qemu:///system
 #   LAB_DIR=<repo>/.lab LAB_PREFIX=osu-lab
+#   LAB_PREDOWNLOAD=groups (parallel: e2e predownloads every node at once, with the Plan
+#              concurrency raised to the number of nodes, and checks that they overlapped)
 #   LAB_IMAGE= (e.g. ghcr.io/hector295/os-upgrade:0.1.0: e2e runs os-upgrade from that image
 #              with docker instead of bin/os-upgrade from the repo)
 set -eu
@@ -42,6 +44,7 @@ LAB_RKE2_CHANNEL="${LAB_RKE2_CHANNEL:-v1.33}"
 LAB_RKE2_VERSION="${LAB_RKE2_VERSION-v1.33.13+rke2r2}"
 LAB_OVERLAY="${LAB_OVERLAY:-$REPO_DIR/manifests/overlays/lab-vm}"
 LAB_IMAGE="${LAB_IMAGE:-}"
+LAB_PREDOWNLOAD="${LAB_PREDOWNLOAD:-groups}"
 export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 
 case "$LAB_UBUNTU" in
@@ -352,8 +355,20 @@ osu() {
   fi
 }
 
+# Most predownload Jobs that were running at the same time (from their start/completion times).
+max_parallel_predownload() {
+  kc -n "$SUC_NS" get jobs -l upgrade.cattle.io/plan=os-upgrade-predownload -o json \
+    | "$TOOLS_BIN/yq" -p json '.items[] | [.status.startTime, .status.completionTime // ""] | @tsv' \
+    | while IFS='	' read -r start end; do
+        echo "$(date -d "$start" +%s) 1"
+        [ -z "$end" ] || echo "$(date -d "$end" +%s) -1"
+      done \
+    | sort -k1,1n -k2,2n | awk '{c += $2; if (c > m) m = c} END {print m + 0}'
+}
+
 cmd_e2e() {
   [ -f "$KUBECONFIG_FILE" ] || die "no lab: run 'lab/lab.sh up' first"
+  case "$LAB_PREDOWNLOAD" in groups|parallel) ;; *) die "LAB_PREDOWNLOAD must be groups or parallel" ;; esac
   export KUBECONFIG="$KUBECONFIG_FILE" NS="$SUC_NS"
   start=$(date +%s)
   # The overlay as an operator keeps it: its own directory with the CRD exported from the lab.
@@ -361,6 +376,11 @@ cmd_e2e() {
   mkdir -p "$LAB_DIR/e2e"
   cp -R "$LAB_OVERLAY" "$LAB_DIR/e2e/cluster"
   cp "$LAB_DIR/schema/crd-plans.json" "$LAB_DIR/e2e/cluster/"
+  nodes=$(all_names | wc -l)
+  if [ "$LAB_PREDOWNLOAD" = parallel ]; then
+    "$TOOLS_BIN/yq" -i ".patches += [{\"target\": {\"kind\": \"Plan\", \"name\": \"os-upgrade-predownload\"},
+      \"patch\": \"- op: replace\\n  path: /spec/concurrency\\n  value: $nodes\\n\"}]" "$LAB_DIR/e2e/cluster/kustomization.yaml"
+  fi
   out="$LAB_DIR/e2e/cluster/manifests.yaml"
   info "os-upgrade $(osu version)${LAB_IMAGE:+ (image $LAB_IMAGE)}: render, validation and apply of $LAB_OVERLAY"
   osu apply cluster --yes
@@ -368,9 +388,16 @@ cmd_e2e() {
   target=$("$TOOLS_BIN/yq" 'select(.kind == "ConfigMap") | .data.TARGET_VERSION' "$out")
 
   osu preflight
-  for g in 1 2; do
-    osu rollout predownload --group "$g" --wait --yes
-  done
+  if [ "$LAB_PREDOWNLOAD" = parallel ]; then
+    osu rollout predownload --nodes "$(all_names | paste -sd, -)" --wait --yes
+    parallel=$(max_parallel_predownload)
+    info "Predownload: up to $parallel of $nodes nodes at once"
+    [ "$parallel" -eq "$nodes" ] || die "the predownload did not run on every node at once"
+  else
+    for g in 1 2; do
+      osu rollout predownload --group "$g" --wait --yes
+    done
+  fi
   for g in 1 2; do
     osu rollout upgrade --group "$g" --yes
   done

@@ -53,6 +53,16 @@ needs Docker:
 LAB_IMAGE=ghcr.io/hector295/os-upgrade:0.1.0 lab/lab.sh e2e
 ```
 
+To test the **parallel predownload** (every node downloading at once, as with a raised
+`concurrency` of the predownload Plan in production), use `LAB_PREDOWNLOAD=parallel`: `e2e` raises
+the Plan concurrency to the number of nodes, launches the predownload on all of them with a
+single `rollout predownload` and fails unless all the Jobs overlapped:
+
+```sh
+LAB_UBUNTU=24.04 LAB_PREDOWNLOAD=parallel LAB_OVERLAY=$PWD/manifests/overlays/lab-vm-2604 \
+  LAB_IMAGE=ghcr.io/hector295/os-upgrade:0.1.0 lab/lab.sh e2e
+```
+
 Use the same `LAB_UBUNTU` for every command of that lab (`status`, `ssh`, `down`...).
 
 With `LAB_CP` below 3, `preflight.sh` and `rollout.sh` fail the etcd check (3 members minimum);
@@ -70,7 +80,8 @@ Every step goes through `os-upgrade`, as an operator would run it, on a copy of 
 1. `os-upgrade apply cluster --yes`: renders the overlay (`manifests/overlays/lab-vm` by default,
    or `LAB_OVERLAY`), validates it against the CRD **exported from the lab** and applies it.
 2. `os-upgrade preflight`.
-3. `os-upgrade rollout predownload --wait` for group 1 (worker) and group 2 (control plane).
+3. `os-upgrade rollout predownload --wait` for group 1 (worker) and group 2 (control plane), or
+   for every node at once with `LAB_PREDOWNLOAD=parallel`.
 4. `os-upgrade rollout upgrade --yes` for group 1 and then group 2: this includes `move-leader`
    of the etcd leader, phase supervision and verification after each node.
 5. Checks that **all** nodes end up on the overlay's `TARGET_VERSION` with its `KERNEL_VERSION`
