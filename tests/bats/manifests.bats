@@ -25,17 +25,23 @@ edit() { "$YQ" -i "$1" "$M"; }
   [[ "$output" == *"Validation OK"*"6.8.0-139-generic"* ]]
 }
 
-@test "render lab: the Plans reference the generated hashed Secret and ConfigMap" {
-  secret=$("$YQ" 'select(.kind == "Secret") | .metadata.name' "$M")
+@test "render lab: the Plans reference the generated hashed Secrets and ConfigMap" {
+  secret=$("$YQ" 'select(.kind == "Secret" and (.metadata.name | test("^os-upgrade-script"))) | .metadata.name' "$M")
+  proxy=$("$YQ" 'select(.kind == "Secret" and (.metadata.name | test("^os-upgrade-proxy"))) | .metadata.name' "$M")
   cm=$("$YQ" 'select(.kind == "ConfigMap") | .metadata.name' "$M")
   [[ "$secret" == os-upgrade-script-* ]]
+  [[ "$proxy" == os-upgrade-proxy-* ]]
   [[ "$cm" == os-upgrade-config-* ]]
   [ "$("$YQ" ea '[select(.kind == "Plan") | .spec.secrets[0].name] | unique | .[]' "$M")" = "$secret" ]
   [ "$("$YQ" ea '[select(.kind == "Plan") | .spec.upgrade.envFrom[0].configMapRef.name] | unique | .[]' "$M")" = "$cm" ]
+  # The proxy Secret goes after the ConfigMap (its values win), and is optional.
+  [ "$("$YQ" ea '[select(.kind == "Plan") | (.spec.upgrade, .spec.prepare) | select(.) | .envFrom[1].secretRef | .name + " " + (.optional | tostring)] | unique | .[]' "$M")" = "$proxy true" ]
+  # Empty without proxy.env.
+  [ "$("$YQ" ea '[select(.kind == "Secret" and (.metadata.name | test("^os-upgrade-proxy")))] | (.[0].data // {}) | length' "$M")" -eq 0 ]
 }
 
 @test "render lab: the Secret contains the current upgrade.sh" {
-  "$YQ" 'select(.kind == "Secret") | .data["upgrade.sh"]' "$M" | base64 -d > "$BATS_TEST_TMPDIR/u.sh"
+  "$YQ" 'select(.kind == "Secret" and (.metadata.name | test("^os-upgrade-script"))) | .data["upgrade.sh"]' "$M" | base64 -d > "$BATS_TEST_TMPDIR/u.sh"
   cmp "$BATS_TEST_TMPDIR/u.sh" "$REPO/scripts/upgrade.sh"
 }
 
@@ -115,6 +121,36 @@ edit() { "$YQ" -i "$1" "$M"; }
   [[ "$output" == *"HTTP_PROXY must start with http://"* ]]
 }
 
+@test "validation: proxy credentials in config.env (a ConfigMap) are rejected without showing them" {
+  edit '(select(.kind == "ConfigMap") | .data.HTTPS_PROXY) = "http://osu:s3cret@proxy:3128"'
+  run sh "$VALIDATE" "$M" "$SCHEMA"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"HTTPS_PROXY has credentials in config.env"*"move it to proxy.env"* ]]
+  [[ "$output" != *"s3cret"* ]]
+}
+
+@test "proxy.env: the overlay fills the proxy Secret, the Plans point to it and it validates" {
+  printf 'HTTP_PROXY=http://osu:p%%40ss@proxy:3128\nHTTPS_PROXY=http://osu:p%%40ss@proxy:3128\nNO_PROXY=10.0.0.0/8\n' \
+    > "$BATS_TEST_TMPDIR/proxy.env"
+  make_overlay_with_proxy "$BATS_TEST_TMPDIR/proxy.env"
+  proxy=$("$YQ" 'select(.kind == "Secret" and (.metadata.name | test("^os-upgrade-proxy"))) | .metadata.name' "$M")
+  [ "$("$YQ" "select(.kind == \"Secret\" and .metadata.name == \"$proxy\") | .metadata.namespace" "$M")" = cattle-system ]
+  [ "$("$YQ" "select(.kind == \"Secret\" and .metadata.name == \"$proxy\") | .data.HTTPS_PROXY" "$M" | base64 -d)" = "http://osu:p%40ss@proxy:3128" ]
+  [ "$("$YQ" ea '[select(.kind == "Plan") | .spec.upgrade.envFrom[1].secretRef.name] | unique | .[]' "$M")" = "$proxy" ]
+  run sh "$VALIDATE" "$M" "$SCHEMA"
+  [ "$status" -eq 0 ]
+}
+
+@test "proxy.env: unknown keys and URLs without a scheme are rejected without showing them" {
+  printf 'HTTPS_PROXY=osu:s3cret@proxy:3128\nAPT_MIRROR=http://m\n' > "$BATS_TEST_TMPDIR/proxy.env"
+  make_overlay_with_proxy "$BATS_TEST_TMPDIR/proxy.env"
+  run sh "$VALIDATE" "$M" "$SCHEMA"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"proxy.env only accepts HTTP_PROXY, HTTPS_PROXY and NO_PROXY (found APT_MIRROR)"* ]]
+  [[ "$output" == *"HTTPS_PROXY in proxy.env must start with http://"* ]]
+  [[ "$output" != *"s3cret"* ]]
+}
+
 @test "validation: different namespaces are rejected" {
   edit '(select(.metadata.name == "os-upgrade-cp") | .metadata.namespace) = "otro"'
   run sh "$VALIDATE" "$M" "$SCHEMA"
@@ -151,10 +187,32 @@ YAML
   rm -rf "$OVL"
 }
 
+# Same, with a proxy.env for the proxy Secret.
+make_overlay_with_proxy() {
+  OVL="$REPO/manifests/overlays/.bats-$$"
+  mkdir -p "$OVL"
+  echo "KERNEL_VERSION=6.8.0-139-generic" > "$OVL/config.env"
+  cp "$1" "$OVL/proxy.env"
+  cat > "$OVL/kustomization.yaml" <<'YAML'
+resources:
+  - ../../base
+configMapGenerator:
+  - name: os-upgrade-config
+    behavior: merge
+    envs: [config.env]
+secretGenerator:
+  - name: os-upgrade-proxy
+    behavior: merge
+    envs: [proxy.env]
+YAML
+  "$REPO/tools/bin/kustomize" build --load-restrictor LoadRestrictionsNone "$OVL" > "$M"
+  rm -rf "$OVL"
+}
+
 @test "hook: the overlay adds it to the Secret next to upgrade.sh and it validates" {
   make_overlay_with_hook "$REPO/docs/examples/post-upgrade-hook.sh"
-  [ "$("$YQ" 'select(.kind == "Secret") | .data | keys | join(",")' "$M")" = "post-upgrade-hook.sh,upgrade.sh" ]
-  "$YQ" 'select(.kind == "Secret") | .data["post-upgrade-hook.sh"]' "$M" | base64 -d | cmp - "$REPO/docs/examples/post-upgrade-hook.sh"
+  [ "$("$YQ" 'select(.kind == "Secret" and (.metadata.name | test("^os-upgrade-script"))) | .data | keys | join(",")' "$M")" = "post-upgrade-hook.sh,upgrade.sh" ]
+  "$YQ" 'select(.kind == "Secret" and (.metadata.name | test("^os-upgrade-script"))) | .data["post-upgrade-hook.sh"]' "$M" | base64 -d | cmp - "$REPO/docs/examples/post-upgrade-hook.sh"
   run sh "$VALIDATE" "$M" "$SCHEMA"
   [ "$status" -eq 0 ]
 }

@@ -45,6 +45,8 @@ os-upgrade version
   answered with "no". `--user` makes the files it writes yours.
 - `KUBECONFIG` must point to a single file. A kubeconfig that references other files
   (certificates, `exec` plugins) needs those mounted too; the Rancher one is self-contained.
+- If your machine needs a proxy to reach the cluster API, pass it too:
+  `-e HTTPS_PROXY -e NO_PROXY` (with credentials in it, mind your shell history).
 - The image runs `kubectl` too: `docker run --rm -it ... --entrypoint kubectl
   ghcr.io/hector295/os-upgrade:0.1.0 get nodes`.
 - The registry is public: no `docker login` is needed. To use an internal registry, copy the

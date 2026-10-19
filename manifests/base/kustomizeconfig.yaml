@@ -5,6 +5,10 @@ nameReference:
     fieldSpecs:
       - kind: Plan
         path: spec/secrets/name
+      - kind: Plan
+        path: spec/prepare/envFrom/secretRef/name
+      - kind: Plan
+        path: spec/upgrade/envFrom/secretRef/name
   - kind: ConfigMap
     fieldSpecs:
       - kind: Plan

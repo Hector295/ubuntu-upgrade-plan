@@ -29,8 +29,8 @@ Only the ones that differ from the default (`manifests/base/config.env`) need to
 | `SINGLE_REBOOT` | `true` | If the node would need a reboot before the release upgrade (pending libc6, linux-base or a source-release kernel), the preflight fails **before the drain**. With `false` it only warns and the node reboots twice |
 | `REQUIRE_PREDOWNLOAD` | `true` | The preflight requires the predownload to have been done for this `KERNEL_VERSION`. With `false` it only warns and everything is downloaded during the window |
 | `APT_MIRROR` | *(empty)* | Mirror for the predownload, e.g. `http://mirror.internal/ubuntu`. Empty: the one the node uses in its apt sources |
-| `HTTP_PROXY` | *(empty)* | HTTP proxy for apt and `do-release-upgrade` (`http://host:port`) |
-| `HTTPS_PROXY` | *(empty)* | HTTPS proxy |
+| `HTTP_PROXY` | *(empty)* | Proxy for the HTTP traffic of apt and `do-release-upgrade` (`http://host:port`). **Without credentials**: a proxy with a user goes in `proxy.env` ([Proxy](#proxy)) |
+| `HTTPS_PROXY` | *(empty)* | Proxy for the HTTPS traffic (usually the same URL) |
 | `NO_PROXY` | *(empty)* | Destinations that bypass the proxy (e.g. the internal mirror) |
 | `MIN_FREE_ROOT_MB` | `5000` | Minimum free space on `/` |
 | `MIN_FREE_BOOT_MB` | `300` | Minimum free space on `/boot` |
@@ -40,7 +40,64 @@ Only the ones that differ from the default (`manifests/base/config.env`) need to
 
 The proxy is exported to apt, to `do-release-upgrade` and to the host systemd unit. If the nodes
 already have the proxy configured in apt (`Acquire::http::Proxy`), there is no need to repeat it
-here.
+here. See [Proxy](#proxy) for proxies with credentials and what the nodes need besides this.
+
+## Proxy
+
+Everything the nodes download (the predownload, `apt-get update` in `prepare`, the release
+upgrade and the kernel) goes through `HTTP_PROXY`/`HTTPS_PROXY`. The usual value of both is the
+same `http://` URL: HTTPS goes through the proxy with `CONNECT`.
+
+**Without credentials:** in `config.env`.
+
+```sh
+HTTP_PROXY=http://proxy.internal:3128
+HTTPS_PROXY=http://proxy.internal:3128
+NO_PROXY=127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local
+```
+
+**With a user and a password:** in a `proxy.env` file next to `config.env`, which becomes the
+Secret `os-upgrade-proxy-<hash>` instead of going into the ConfigMap. `os-upgrade validate`
+rejects credentials in `config.env` and never prints the values of `proxy.env`.
+
+```sh
+# <cluster>/proxy.env (keep it out of git, or encrypted: it has the password)
+HTTP_PROXY=http://user:p%40ss%3Aword@proxy.internal:3128
+HTTPS_PROXY=http://user:p%40ss%3Aword@proxy.internal:3128
+NO_PROXY=127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local
+```
+
+and in the overlay `kustomization.yaml`:
+
+```yaml
+secretGenerator:
+  - name: os-upgrade-proxy
+    behavior: merge
+    envs:
+      - proxy.env
+```
+
+- Characters of the user or password that are special in a URL must be percent-encoded:
+  `@` → `%40`, `:` → `%3A`, `/` → `%2F`, `#` → `%23`, `%` → `%25`, `!` → `%21`, space → `%20`.
+- `proxy.env` only accepts `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`. Its values win over the
+  ones in `config.env`.
+- The Jobs receive it with `envFrom` (it does not appear in the Plan or in `kubectl describe`).
+  On the node, the configuration that the host unit uses (`/var/lib/os-upgrade/config`) is only
+  readable by root.
+- Changing the password produces a new Secret and new Plans, like any change of `config.env`.
+
+**What the nodes need besides this** (it is not configured by os-upgrade):
+
+- **The Job image** (`docker.io/library/ubuntu:24.04` or the one of your registry) is pulled by
+  containerd. Behind a proxy, RKE2 needs it in `/etc/default/rke2-server` and
+  `/etc/default/rke2-agent` (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` with the cluster and service
+  CIDRs; Rancher sets it when the cluster is provisioned with a proxy), or the image must come from
+  an internal registry ([Plan settings](#plan-settings-kustomizationyaml)). The predownload uses the
+  same image: if it cannot be pulled, its Jobs stay in `ImagePullBackOff` days before the window.
+- `NO_PROXY` must include the internal mirror, if there is one.
+
+Tested in the lab with the nodes **without direct Internet access** (only through a squid proxy),
+with and without credentials ([lab.md](lab.md#proxy)).
 
 ## Supported transitions
 

@@ -27,3 +27,8 @@ spec:
     envFrom:
       - configMapRef:
           name: os-upgrade-config
+      # Optional proxy with credentials (proxy.env in the overlay, docs/configuration.md#proxy).
+      # It goes after the ConfigMap: its values win.
+      - secretRef:
+          name: os-upgrade-proxy
+          optional: true

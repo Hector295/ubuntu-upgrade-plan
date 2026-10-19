@@ -114,11 +114,28 @@ done
 for key in MIN_FREE_ROOT_MB MIN_FREE_BOOT_MB MAX_REBOOTS POST_UPGRADE_HOOK_RETRIES; do
   case "$(cfg "$key")" in ''|*[!0-9]*) error "$key must be an integer" ;; esac
 done
+url_ok() { case "$1" in ''|http://*|https://*) return 0 ;; *) return 1 ;; esac; }
+# user:password@ in a URL. The value itself is never printed.
+has_credentials() { echo "$1" | grep -Eq '^[a-z]+://[^/]*@'; }
+
 for key in HTTP_PROXY HTTPS_PROXY APT_MIRROR; do
   val=$(cfg "$key")
-  case "$val" in
-    ''|http://*|https://*) ;;
-    *) error "$key must start with http:// or https:// (value: '$val')" ;;
+  if has_credentials "$val"; then
+    error "$key has credentials in config.env (a ConfigMap, readable by anyone who reads ConfigMaps): move it to proxy.env (docs/configuration.md#proxy)"
+  elif ! url_ok "$val"; then
+    error "$key must start with http:// or https:// (value: '$val')"
+  fi
+done
+
+# Proxy with credentials (Secret os-upgrade-proxy, from the overlay proxy.env).
+proxy_secret() { "$YQ" ea "[.] | map(select(.kind == \"Secret\" and (.metadata.name | test(\"^os-upgrade-proxy\")))) | (.[0].data // {}) | $1" "$MANIFESTS"; }
+for key in $(proxy_secret 'keys | .[]'); do
+  case "$key" in
+    HTTP_PROXY|HTTPS_PROXY)
+      url_ok "$(proxy_secret ".$key" | base64 -d)" \
+        || error "$key in proxy.env must start with http:// or https:// (value not shown: it may have credentials)" ;;
+    NO_PROXY) ;;
+    *) error "proxy.env only accepts HTTP_PROXY, HTTPS_PROXY and NO_PROXY (found $key)" ;;
   esac
 done
 

@@ -26,6 +26,11 @@ spec:
     envFrom:
       - configMapRef:
           name: os-upgrade-config
+      # Optional proxy with credentials (proxy.env in the overlay, docs/configuration.md#proxy).
+      # It goes after the ConfigMap: its values win.
+      - secretRef:
+          name: os-upgrade-proxy
+          optional: true
     securityContext:
       privileged: true             # SUC only makes the upgrade container privileged by default
   # No drain.timeout: in SUC v0.16 it is int32 nanoseconds (max ~2 s) and breaks the
@@ -41,3 +46,8 @@ spec:
     envFrom:
       - configMapRef:
           name: os-upgrade-config
+      # Optional proxy with credentials (proxy.env in the overlay, docs/configuration.md#proxy).
+      # It goes after the ConfigMap: its values win.
+      - secretRef:
+          name: os-upgrade-proxy
+          optional: true

@@ -230,7 +230,9 @@ validate_config() {
 write_config() {
   mkdir -p "$STATE_DIR"
   tmp="$CONFIG_FILE.tmp"
-  : > "$tmp"
+  # Only root: it may hold proxy credentials.
+  ( umask 077 && : > "$tmp" )
+  chmod 0600 "$tmp"
   for k in $CONFIG_KEYS; do
     eval "val=\$$k"
     printf '%s=%s\n' "$k" "$(shell_quote "$val")" >> "$tmp"

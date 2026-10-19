@@ -19,6 +19,9 @@ secretGenerator:
   - name: os-upgrade-script
     files:
       - upgrade.sh=../../scripts/upgrade.sh
+  # Proxy with credentials: empty here; an overlay fills it from its proxy.env with
+  # behavior: merge (docs/configuration.md#proxy).
+  - name: os-upgrade-proxy
 
 configMapGenerator:
   - name: os-upgrade-config

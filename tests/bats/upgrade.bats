@@ -301,6 +301,13 @@ EOF
   awk '/do-release-upgrade/ {f=1} f && /env http_proxy=http:\/\/proxy:3128/ {ok=1} END {exit !ok}' "$STUB_STATE/calls.log"
 }
 
+@test "upgrade: the saved configuration is only readable by root (proxy credentials)" {
+  HTTP_PROXY="http://osu:s3cret@proxy:3128" run sh "$SCRIPT" upgrade
+  [ "$(stat -c %a "$(state config)")" = 600 ]
+  run grep -r s3cret "$ROOT/var/log"
+  [ "$status" -ne 0 ]
+}
+
 @test "upgrade: values with quotes are saved without breaking the configuration" {
   HTTP_PROXY="http://us'er:pa ss@proxy:3128" run sh "$SCRIPT" upgrade
   # shellcheck disable=SC1090
