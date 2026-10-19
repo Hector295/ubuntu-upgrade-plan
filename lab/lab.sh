@@ -6,7 +6,7 @@
 #   plan        show what would be created (changes nothing)
 #   up          create the VMs, install RKE2 and the SUC, and leave the kubeconfig in $LAB_DIR
 #   e2e         render + validation + apply + preflight + predownload + upgrade of every node
-#               with rollout.sh, then check they end on the target version with the pinned kernel
+#               with os-upgrade, then check they end on the target version with the pinned kernel
 #   status      lab VMs and cluster nodes
 #   env         print the exports to use kubectl/rollout.sh against the lab
 #   ssh <vm>    ssh into a lab VM (e.g. osu-lab-cp1)
@@ -21,6 +21,8 @@
 #   LAB_RKE2_VERSION=v1.33.13+rke2r2 (empty: use the LAB_RKE2_CHANNEL channel, e.g. v1.33)
 #   LAB_POOL=default LAB_NET=default LIBVIRT_DEFAULT_URI=qemu:///system
 #   LAB_DIR=<repo>/.lab LAB_PREFIX=osu-lab
+#   LAB_IMAGE= (e.g. ghcr.io/hector295/os-upgrade:0.1.0: e2e runs os-upgrade from that image
+#              with docker instead of bin/os-upgrade from the repo)
 set -eu
 
 REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -39,6 +41,7 @@ LAB_RKE2_CHANNEL="${LAB_RKE2_CHANNEL:-v1.33}"
 # Fixed version by default: a channel may point to a release that has no artifacts yet.
 LAB_RKE2_VERSION="${LAB_RKE2_VERSION-v1.33.13+rke2r2}"
 LAB_OVERLAY="${LAB_OVERLAY:-$REPO_DIR/manifests/overlays/lab-vm}"
+LAB_IMAGE="${LAB_IMAGE:-}"
 export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 
 case "$LAB_UBUNTU" in
@@ -336,31 +339,47 @@ cmd_reports() {
   done
 }
 
+# os-upgrade from the repo, or from LAB_IMAGE. The image sees $LAB_DIR/e2e as /work and uses the
+# host network (the API is on the libvirt network).
+osu() {
+  if [ -n "$LAB_IMAGE" ]; then
+    docker run --rm --network host --user "$(id -u):$(id -g)" -v /etc/localtime:/etc/localtime:ro \
+      -v "$LAB_DIR/e2e:/work" -v "$KUBECONFIG_FILE:/kube/config:ro" -e KUBECONFIG=/kube/config \
+      -e NS="$SUC_NS" ${ETCD_MIN_MEMBERS:+-e ETCD_MIN_MEMBERS="$ETCD_MIN_MEMBERS"} \
+      "$LAB_IMAGE" "$@"
+  else
+    (cd "$LAB_DIR/e2e" && "$REPO_DIR/bin/os-upgrade" "$@")
+  fi
+}
+
 cmd_e2e() {
   [ -f "$KUBECONFIG_FILE" ] || die "no lab: run 'lab/lab.sh up' first"
   export KUBECONFIG="$KUBECONFIG_FILE" NS="$SUC_NS"
   start=$(date +%s)
-  out="$LAB_DIR/manifests.yaml"
-  info "Render and validation of $LAB_OVERLAY"
-  "$TOOLS_BIN/kustomize" build --load-restrictor LoadRestrictionsNone "$LAB_OVERLAY" > "$out"
-  sh "$REPO_DIR/scripts/validate-manifests.sh" "$out" "$LAB_DIR/schema"
-  "$KUBECTL" apply -f "$out" >/dev/null
+  # The overlay as an operator keeps it: its own directory with the CRD exported from the lab.
+  rm -rf "$LAB_DIR/e2e"
+  mkdir -p "$LAB_DIR/e2e"
+  cp -R "$LAB_OVERLAY" "$LAB_DIR/e2e/cluster"
+  cp "$LAB_DIR/schema/crd-plans.json" "$LAB_DIR/e2e/cluster/"
+  out="$LAB_DIR/e2e/cluster/manifests.yaml"
+  info "os-upgrade $(osu version)${LAB_IMAGE:+ (image $LAB_IMAGE)}: render, validation and apply of $LAB_OVERLAY"
+  osu apply cluster --yes
   kernel=$("$TOOLS_BIN/yq" 'select(.kind == "ConfigMap") | .data.KERNEL_VERSION' "$out")
   target=$("$TOOLS_BIN/yq" 'select(.kind == "ConfigMap") | .data.TARGET_VERSION' "$out")
 
-  sh "$REPO_DIR/scripts/preflight.sh"
+  osu preflight
   for g in 1 2; do
-    sh "$REPO_DIR/scripts/rollout.sh" predownload --group "$g" --wait --yes
+    osu rollout predownload --group "$g" --wait --yes
   done
   for g in 1 2; do
-    sh "$REPO_DIR/scripts/rollout.sh" upgrade --group "$g" --yes
+    osu rollout upgrade --group "$g" --yes
   done
 
   info "Final check"
   bad=$("$KUBECTL" get nodes -o json | "$TOOLS_BIN/yq" -p json ".items[] | select((.status.nodeInfo.osImage | test(\"Ubuntu $target\") | not) or .status.nodeInfo.kernelVersion != \"$kernel\") | .metadata.name")
-  sh "$REPO_DIR/scripts/check-cluster.sh" >/dev/null || die "check-cluster.sh reports problems"
+  osu check >/dev/null || die "os-upgrade check reports problems"
   [ -z "$bad" ] || die "nodes not upgraded: $bad"
-  sh "$REPO_DIR/scripts/rollout.sh" status
+  osu rollout status
   info "E2E OK in $(( ($(date +%s) - start) / 60 )) min: all nodes on Ubuntu $target with $kernel"
 }
 

@@ -98,7 +98,9 @@ Both transitions passed the VM lab end-to-end test ([docs/lab.md](docs/lab.md)):
 - 22.04 → 24.04 with `6.8.0-139-generic`.
 - 24.04 → 26.04.1 with `7.0.0-38-generic`.
 
-It has not yet been run on bare metal or with Rancher's own SUC.
+The 22.04 → 24.04 transition also passed it with the released image
+(`LAB_IMAGE=ghcr.io/hector295/os-upgrade:0.1.0`, 56 min). It has not yet been run on bare metal
+or with Rancher's own SUC.
 
 ## Documentation
 

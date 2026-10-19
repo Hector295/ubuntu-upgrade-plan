@@ -2,8 +2,8 @@
 
 `lab/lab.sh` creates on your machine an RKE2 cluster of Ubuntu 22.04 (or 24.04) VMs on libvirt
 and installs the **official system-upgrade-controller v0.16.3** (the same version Rancher uses).
-It tests the whole flow (`preflight.sh`, `rollout.sh`, the Plans and `upgrade.sh`) without
-touching any real cluster.
+It tests the whole flow (`os-upgrade` with `preflight`, `rollout`, the Plans and `upgrade.sh`)
+without touching any real cluster.
 
 ## Requirements
 
@@ -46,6 +46,13 @@ LAB_UBUNTU=24.04 lab/lab.sh up
 LAB_UBUNTU=24.04 LAB_OVERLAY=$PWD/manifests/overlays/lab-vm-2604 lab/lab.sh e2e
 ```
 
+To test a **released image** instead of the repo (`bin/os-upgrade`), pass it in `LAB_IMAGE`; it
+needs Docker:
+
+```sh
+LAB_IMAGE=ghcr.io/hector295/os-upgrade:0.1.0 lab/lab.sh e2e
+```
+
 Use the same `LAB_UBUNTU` for every command of that lab (`status`, `ssh`, `down`...).
 
 With `LAB_CP` below 3, `preflight.sh` and `rollout.sh` fail the etcd check (3 members minimum);
@@ -57,15 +64,17 @@ there are tests that check it.
 
 ## What `e2e` does
 
-1. Renders the manifests of the overlay (`manifests/overlays/lab-vm` by default, or
-   `LAB_OVERLAY`) and validates them against the CRD **exported from the lab**
-   (`.lab/schema/crd-plans.json`).
-2. Applies the Plans and runs `preflight.sh`.
-3. `rollout.sh predownload --wait` for group 1 (worker) and group 2 (control plane).
-4. `rollout.sh upgrade --yes` for group 1 and then group 2: this includes `move-leader` of the
-   etcd leader, phase supervision and verification after each node.
+Every step goes through `os-upgrade`, as an operator would run it, on a copy of the overlay in
+`.lab/e2e/cluster`:
+
+1. `os-upgrade apply cluster --yes`: renders the overlay (`manifests/overlays/lab-vm` by default,
+   or `LAB_OVERLAY`), validates it against the CRD **exported from the lab** and applies it.
+2. `os-upgrade preflight`.
+3. `os-upgrade rollout predownload --wait` for group 1 (worker) and group 2 (control plane).
+4. `os-upgrade rollout upgrade --yes` for group 1 and then group 2: this includes `move-leader`
+   of the etcd leader, phase supervision and verification after each node.
 5. Checks that **all** nodes end up on the overlay's `TARGET_VERSION` with its `KERNEL_VERSION`
-   and that `check-cluster.sh` is healthy. The last line is
+   and that `os-upgrade check` is healthy. The last line is
    `E2E OK in <n> min: all nodes on Ubuntu <target> with <kernel>`.
 
 With 4 nodes it takes about one hour (each node: drain, release upgrade and one reboot).

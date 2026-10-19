@@ -32,7 +32,7 @@ symlink; the cluster configuration is not inside the package, so nothing else ch
 
 ```sh
 docker pull ghcr.io/hector295/os-upgrade:0.1.0
-alias os-upgrade='docker run --rm -it --user "$(id -u):$(id -g)" \
+alias os-upgrade='docker run --rm -it --user "$(id -u):$(id -g)" -v /etc/localtime:/etc/localtime:ro \
   -v "$PWD:/work" -v "$KUBECONFIG:/kube/config:ro" -e KUBECONFIG=/kube/config \
   ghcr.io/hector295/os-upgrade:0.1.0'
 os-upgrade version
@@ -40,6 +40,7 @@ os-upgrade version
 
 - The current directory is mounted on `/work`: run it from the directory that holds the cluster
   overlays, and refer to them with relative paths (`os-upgrade validate my-cluster`).
+- `/etc/localtime` makes the log times match your clock (the image is in UTC otherwise).
 - `-it` is needed for the confirmations of `rollout` and `apply`; without a terminal they are
   answered with "no". `--user` makes the files it writes yours.
 - `KUBECONFIG` must point to a single file. A kubeconfig that references other files
