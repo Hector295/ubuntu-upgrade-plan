@@ -9,7 +9,7 @@
 #               with os-upgrade, then check they end on the target version with the pinned kernel
 #   status      lab VMs and cluster nodes
 #   env         print the exports to use kubectl/rollout.sh against the lab
-#   ssh <vm>    ssh into a lab VM (e.g. osu-lab-cp1)
+#   ssh <vm>    ssh into a lab VM (e.g. osu-lab-cp1, osu-lab-proxy)
 #   reports     show the os-upgrade report of every node
 #   down        delete the lab VMs and disks (only its own, by exact name)
 #   destroy     like down, and also delete the base image from the pool and $LAB_DIR
@@ -25,6 +25,10 @@
 #              concurrency raised to the number of nodes, and checks that they overlapped)
 #   LAB_IMAGE= (e.g. ghcr.io/hector295/os-upgrade:0.1.0: e2e runs os-upgrade from that image
 #              with docker instead of bin/os-upgrade from the repo)
+#   LAB_PROXY=off (open | auth: up adds a squid VM, osu-lab-proxy, and the nodes can only reach
+#              the Internet through it; auth requires a user and a password with special
+#              characters. e2e configures os-upgrade with it: config.env for open, proxy.env
+#              (Secret) for auth. Chosen at up time; later commands use the saved mode)
 set -eu
 
 REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -45,6 +49,7 @@ LAB_RKE2_VERSION="${LAB_RKE2_VERSION-v1.33.13+rke2r2}"
 LAB_OVERLAY="${LAB_OVERLAY:-$REPO_DIR/manifests/overlays/lab-vm}"
 LAB_IMAGE="${LAB_IMAGE:-}"
 LAB_PREDOWNLOAD="${LAB_PREDOWNLOAD:-groups}"
+LAB_PROXY="${LAB_PROXY:-}"
 export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 
 case "$LAB_UBUNTU" in
@@ -61,6 +66,12 @@ SUC_YAML_SHA=e08b240b349ffac89dd2a1a3276211711aabe3433eb253c712d592b74ce7595d
 SUC_NS=system-upgrade
 
 KEY="$LAB_DIR/id_ed25519"
+PROXY_VM="$LAB_PREFIX-proxy"
+PROXY_MODE_FILE="$LAB_DIR/proxy-mode"
+PROXY_PASS_FILE="$LAB_DIR/proxy-password"
+PROXY_USER=osu
+# Destinations that never go through the proxy: lab network, cluster CIDRs and services.
+LAB_NO_PROXY=127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local
 KUBECONFIG_FILE="$LAB_DIR/kubeconfig"
 TOOLS_BIN="$REPO_DIR/tools/bin"
 # Pinned kubectl from tools/ (make tools): controlled version, without the quirks of the snap one.
@@ -69,9 +80,10 @@ export KUBECTL
 
 info() { echo "$(date '+%H:%M:%S') $*"; }
 die() { echo "$(date '+%H:%M:%S') ERROR: $*" >&2; exit 1; }
+warn() { echo "$(date '+%H:%M:%S') WARNING: $*" >&2; }
 
 usage() {
-  sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+  awk 'NR > 1 && /^set -eu/ {exit} NR > 1' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
@@ -81,8 +93,17 @@ worker_names() { i=1; while [ "$i" -le "$LAB_WORKERS" ]; do echo "$LAB_PREFIX-w$
 all_names() { cp_names; worker_names; }
 first_cp() { cp_names | head -n1; }
 
-# Only names from the lab topology: down/destroy never touch other VMs.
-is_lab_vm() { all_names | grep -qx "$1"; }
+# Only names from the lab topology (and its proxy): down/destroy never touch other VMs.
+lab_vms() { all_names; echo "$PROXY_VM"; }
+is_lab_vm() { lab_vms | grep -qx "$1"; }
+
+# Proxy mode: LAB_PROXY, or the one saved by up, or off.
+proxy_mode() {
+  if [ -n "$LAB_PROXY" ]; then echo "$LAB_PROXY"
+  elif [ -f "$PROXY_MODE_FILE" ]; then cat "$PROXY_MODE_FILE"
+  else echo off
+  fi
+}
 
 # ------------------------------------------------------------------ libvirt
 domain_exists() { virsh dominfo "$1" >/dev/null 2>&1; }
@@ -147,6 +168,7 @@ ensure_base_image() {
 
 write_seed() {
   name=$1
+  extra=${2:-}
   dir="$LAB_DIR/seed-$name"
   mkdir -p "$dir"
   cat > "$dir/meta-data" <<EOF
@@ -167,23 +189,29 @@ growpart:
   mode: auto
   devices: ["/"]
 EOF
+  [ -z "$extra" ] || echo "$extra" >> "$dir/user-data"
   genisoimage -quiet -output "$dir/seed.iso" -volid cidata -joliet -rock "$dir/user-data" "$dir/meta-data"
   echo "$dir/seed.iso"
 }
 
+# create_vm <name> [<extra cloud-init>] [<cpus> <mem MB> <disk GB>]
 create_vm() {
   name=$1
+  extra=${2:-}
+  cpus=${3:-$LAB_CPUS}
+  mem=${4:-$LAB_MEM_MB}
+  disk=${5:-$LAB_DISK_GB}
   if domain_exists "$name"; then info "$name already exists"; return 0; fi
-  info "Creating $name ($LAB_CPUS CPU, $LAB_MEM_MB MB, $LAB_DISK_GB GB)"
-  vol_exists "$name.qcow2" || virsh vol-create-as "$LAB_POOL" "$name.qcow2" "${LAB_DISK_GB}G" \
+  info "Creating $name ($cpus CPU, $mem MB, $disk GB)"
+  vol_exists "$name.qcow2" || virsh vol-create-as "$LAB_POOL" "$name.qcow2" "${disk}G" \
     --format qcow2 --backing-vol "$BASE_VOL" --backing-vol-format qcow2 >/dev/null
-  seed=$(write_seed "$name")
+  seed=$(write_seed "$name" "$extra")
   if vol_exists "$name-seed.iso"; then virsh vol-delete --pool "$LAB_POOL" "$name-seed.iso" >/dev/null; fi
   upload_volume "$name-seed.iso" "$seed" raw
   boot=""
   if [ "$LAB_UEFI" = true ]; then boot="--boot uefi"; fi
   # shellcheck disable=SC2086 # boot is one option or nothing
-  virt-install --name "$name" --memory "$LAB_MEM_MB" --vcpus "$LAB_CPUS" --import $boot \
+  virt-install --name "$name" --memory "$mem" --vcpus "$cpus" --import $boot \
     --disk "vol=$LAB_POOL/$name.qcow2,bus=virtio" \
     --disk "vol=$LAB_POOL/$name-seed.iso,device=cdrom" \
     --os-variant "ubuntu$LAB_UBUNTU" --network "network=$LAB_NET,model=virtio" \
@@ -203,6 +231,145 @@ delete_vm() {
   done
 }
 
+# ------------------------------------------------------------------ proxy
+# The password has characters that must be percent-encoded in a URL (@ : !).
+proxy_password() { cat "$PROXY_PASS_FILE"; }
+proxy_password_encoded() { proxy_password | sed 's/@/%40/g; s/:/%3A/g; s/!/%21/g'; }
+
+proxy_url() {
+  ip=$(vm_ip "$PROXY_VM")
+  [ -n "$ip" ] || die "$PROXY_VM has no IP (is it running?)"
+  if [ "$(proxy_mode)" = auth ]; then
+    echo "http://$PROXY_USER:$(proxy_password_encoded)@$ip:3128"
+  else
+    echo "http://$ip:3128"
+  fi
+}
+
+# cloud-init for the proxy VM: squid for the lab network, with basic auth in auth mode.
+proxy_user_data() {
+  cat <<EOF
+packages: [squid]
+write_files:
+  - path: /etc/squid/conf.d/osu-lab.conf
+    content: |
+      acl lab_net src 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+EOF
+  if [ "$(proxy_mode)" = auth ]; then
+    cat <<EOF
+      auth_param basic program /usr/lib/squid/basic_ncsa_auth /etc/squid/osu-lab.passwd
+      auth_param basic realm osu-lab
+      acl lab_users proxy_auth REQUIRED
+      http_access allow lab_net lab_users
+  - path: /etc/squid/osu-lab.passwd
+    permissions: '0644'
+    content: |
+      $PROXY_USER:$(openssl passwd -apr1 "$(proxy_password)")
+EOF
+  else
+    echo "      http_access allow lab_net"
+  fi
+  cat <<EOF
+runcmd:
+  - systemctl restart squid
+EOF
+}
+
+# Firewall of the nodes: no direct Internet access, only private destinations (the proxy is
+# one). Loaded by nftables.service on every boot; the counters show what was blocked.
+# Without sets: with a set in this table, the nft bundled in calico (canal) segfaults on 26.04
+# and the canal pod of the node never becomes ready.
+egress_rules() {
+  cat <<'EOF'
+#!/usr/sbin/nft -f
+# osu-lab: the Internet only through the lab proxy.
+table ip osu_lab_egress
+delete table ip osu_lab_egress
+table ip osu_lab_egress {
+  chain output {
+    type filter hook output priority 0; policy accept
+    oif "lo" accept
+    ip daddr 10.0.0.0/8 accept
+    ip daddr 127.0.0.0/8 accept
+    ip daddr 169.254.0.0/16 accept
+    ip daddr 172.16.0.0/12 accept
+    ip daddr 192.168.0.0/16 accept
+    ip daddr 224.0.0.0/4 accept
+    ip daddr 255.255.255.255 accept
+    counter reject
+  }
+  chain forward {
+    type filter hook forward priority 0; policy accept
+    ip daddr 10.0.0.0/8 accept
+    ip daddr 172.16.0.0/12 accept
+    ip daddr 192.168.0.0/16 accept
+    counter reject
+  }
+}
+EOF
+}
+
+# Before RKE2: firewall, and the proxy for rke2 and containerd (images) as in a cluster
+# behind a proxy. Then check that the node only reaches the Internet through the proxy.
+setup_node_proxy() {
+  name=$1
+  url=$(proxy_url)
+  ssh_vm "$name" "command -v nft >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q nftables >/dev/null"
+  egress_rules | ssh_vm "$name" "sudo tee /etc/nftables.conf >/dev/null && sudo systemctl enable --now nftables >/dev/null 2>&1 && sudo nft -f /etc/nftables.conf"
+  for kind in server agent; do
+    printf 'HTTP_PROXY=%s\nHTTPS_PROXY=%s\nNO_PROXY=%s\n' "$url" "$url" "$LAB_NO_PROXY" \
+      | ssh_vm "$name" "sudo tee /etc/default/rke2-$kind >/dev/null && sudo chmod 600 /etc/default/rke2-$kind"
+  done
+  if ssh_vm "$name" "curl -s -o /dev/null -m 10 http://archive.ubuntu.com/ubuntu/"; then
+    die "$name still reaches the Internet without the proxy"
+  fi
+  ssh_vm "$name" "curl -sf -o /dev/null -m 20 -x '$url' http://archive.ubuntu.com/ubuntu/ && curl -sf -o /dev/null -m 20 -x '$url' https://get.rke2.io" \
+    || die "$name does not reach the Internet through the proxy"
+  info "$name: Internet only through $PROXY_VM"
+}
+
+create_proxy() {
+  if [ "$(proxy_mode)" = auth ] && [ ! -f "$PROXY_PASS_FILE" ]; then
+    ( umask 077 && printf '%s@:!x' "$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')" > "$PROXY_PASS_FILE" )
+  fi
+  create_vm "$PROXY_VM" "$(proxy_user_data)" 1 1024 10
+  info "$PROXY_VM: IP $(wait_ip "$PROXY_VM"), waiting for cloud-init"
+  wait_ssh "$PROXY_VM"
+  url=$(proxy_url)
+  if ! curl -sf -o /dev/null -m 20 -x "$url" http://archive.ubuntu.com/ubuntu/ \
+    || ! curl -sf -o /dev/null -m 20 -x "$url" https://get.rke2.io; then
+    die "$PROXY_VM does not work as a proxy"
+  fi
+  if [ "$(proxy_mode)" = auth ]; then
+    code=$(curl -s -o /dev/null -m 20 -w '%{http_code}' -x "http://$(vm_ip "$PROXY_VM"):3128" http://archive.ubuntu.com/ || true)
+    [ "$code" = 407 ] || die "$PROXY_VM accepts requests without credentials (HTTP $code)"
+  fi
+  info "$PROXY_VM: squid ready ($(proxy_mode))"
+}
+
+# After e2e: evidence that every node used the proxy and that no credential reached the logs.
+proxy_evidence() {
+  # access.log.1 only exists if logrotate ran during the e2e.
+  log=$(ssh_vm "$PROXY_VM" "sudo sh -c 'cat /var/log/squid/access.log.1 /var/log/squid/access.log 2>/dev/null; true'")
+  for n in $(all_names); do
+    ip=$(vm_ip "$n")
+    total=$(echo "$log" | awk -v ip="$ip" '$3 == ip' | wc -l)
+    ubuntu=$(echo "$log" | awk -v ip="$ip" '$3 == ip && $7 ~ /ubuntu\.com/' | wc -l)
+    blocked=$(ssh_vm "$n" "sudo nft list chain ip osu_lab_egress output" | sed -n 's/.*counter packets \([0-9]*\).*/\1/p')
+    info "$n: $total requests through the proxy ($ubuntu to *.ubuntu.com); direct connections blocked: ${blocked:-?}"
+    [ -n "$blocked" ] || warn "$n: the egress firewall is gone after the upgrade (/etc/nftables.conf replaced?)"
+    [ "$ubuntu" -gt 0 ] || die "$n did not download from Ubuntu through the proxy"
+    if [ "$(proxy_mode)" = auth ]; then
+      anon=$(echo "$log" | awk -v ip="$ip" -v user="$PROXY_USER" '$3 == ip && $4 !~ /\/407$/ && $8 != user' | wc -l)
+      [ "$anon" -eq 0 ] || die "$n: $anon requests went through without the proxy user"
+      leaks=$(ssh_vm "$n" "sudo grep -rlF -e '$(proxy_password)' -e '$(proxy_password_encoded)' /var/log 2>/dev/null" \
+        | grep -E 'os-upgrade|dist-upgrade|/apt/|apply-os-upgrade' || true)
+      [ -z "$leaks" ] || die "$n: the proxy password appears in: $(echo "$leaks" | tr '\n' ' ')"
+    fi
+  done
+  if [ "$(proxy_mode)" = auth ]; then info "Proxy password not found in the os-upgrade, apt or dist-upgrade logs"; fi
+}
+
 # ------------------------------------------------------------------ RKE2
 install_rke2() {
   name=$1
@@ -220,7 +387,14 @@ install_rke2() {
     [ "$kind" = agent ] || echo "tls-san: [\"$(vm_ip "$name")\"]"
   } | ssh_vm "$name" "sudo mkdir -p /etc/rancher/rke2 && sudo tee /etc/rancher/rke2/config.yaml >/dev/null"
   if [ -n "$LAB_RKE2_VERSION" ]; then install_env="INSTALL_RKE2_VERSION=$LAB_RKE2_VERSION"; else install_env="INSTALL_RKE2_CHANNEL=$LAB_RKE2_CHANNEL"; fi
-  ssh_vm "$name" "curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_TYPE=$kind $install_env sh - >/dev/null && sudo systemctl enable --now rke2-$kind"
+  proxy_env=""
+  curl_proxy=""
+  if [ "$(proxy_mode)" != off ]; then
+    url=$(proxy_url)
+    proxy_env="http_proxy='$url' https_proxy='$url'"
+    curl_proxy="-x '$url'"
+  fi
+  ssh_vm "$name" "curl -sfL $curl_proxy https://get.rke2.io | sudo env $proxy_env INSTALL_RKE2_TYPE=$kind $install_env sh - >/dev/null && sudo systemctl enable --now rke2-$kind"
 }
 
 # Check that the RKE2 release has published artifacts before installing.
@@ -264,12 +438,16 @@ cmd_plan() {
   for n in $(worker_names); do echo "  $n  worker                ${LAB_CPUS} CPU ${LAB_MEM_MB} MB ${LAB_DISK_GB} GB"; done
   echo "  Ubuntu $LAB_UBUNTU ($LAB_CODENAME); image: $IMAGE_NAME (volume $BASE_VOL), boot $( [ "$LAB_UEFI" = true ] && echo UEFI || echo BIOS)"
   echo "  RKE2: ${LAB_RKE2_VERSION:-channel $LAB_RKE2_CHANNEL}; SUC v0.16.3 in $SUC_NS"
+  if [ "$(proxy_mode)" != off ]; then
+    echo "  $PROXY_VM  squid ($(proxy_mode)), 1 CPU 1024 MB; the nodes only reach the Internet through it"
+  fi
   echo "  total: $(( (LAB_CP + LAB_WORKERS) * LAB_MEM_MB )) MB of RAM, $(( (LAB_CP + LAB_WORKERS) * LAB_CPUS )) vCPU"
   echo "  local state: $LAB_DIR"
 }
 
 cmd_up() {
-  for c in virsh virt-install genisoimage curl ssh ssh-keygen sha256sum "$KUBECTL"; do
+  case "$(proxy_mode)" in off|open|auth) ;; *) die "LAB_PROXY must be off, open or auth" ;; esac
+  for c in virsh virt-install genisoimage curl ssh ssh-keygen sha256sum openssl "$KUBECTL"; do
     command -v "$c" >/dev/null 2>&1 || die "missing $c (the tools in tools/ are installed with 'make tools')"
   done
   virsh pool-info "$LAB_POOL" >/dev/null 2>&1 || die "libvirt pool '$LAB_POOL' does not exist"
@@ -279,11 +457,14 @@ cmd_up() {
   check_rke2_release
   [ -f "$LAB_DIR/token" ] || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$LAB_DIR/token"
   cmd_plan
+  proxy_mode > "$PROXY_MODE_FILE"
   ensure_base_image
+  [ "$(proxy_mode)" = off ] || create_proxy
   for n in $(all_names); do create_vm "$n"; done
   for n in $(all_names); do
     info "$n: IP $(wait_ip "$n"), waiting for cloud-init"
     wait_ssh "$n"
+    [ "$(proxy_mode)" = off ] || setup_node_proxy "$n"
   done
 
   cp1=$(first_cp)
@@ -325,7 +506,7 @@ cmd_env() {
 }
 
 cmd_status() {
-  for n in $(all_names); do
+  for n in $(lab_vms); do
     if domain_exists "$n"; then
       printf '%-20s %-10s %s\n' "$n" "$(virsh domstate "$n" 2>/dev/null)" "$(vm_ip "$n")"
     else
@@ -376,13 +557,24 @@ cmd_e2e() {
   mkdir -p "$LAB_DIR/e2e"
   cp -R "$LAB_OVERLAY" "$LAB_DIR/e2e/cluster"
   cp "$LAB_DIR/schema/crd-plans.json" "$LAB_DIR/e2e/cluster/"
+  case "$(proxy_mode)" in
+    open)
+      printf '\nHTTP_PROXY=%s\nHTTPS_PROXY=%s\nNO_PROXY=%s\n' "$(proxy_url)" "$(proxy_url)" "$LAB_NO_PROXY" \
+        >> "$LAB_DIR/e2e/cluster/config.env" ;;
+    auth)
+      # Credentials in the proxy Secret, never in config.env.
+      ( umask 077 && printf 'HTTP_PROXY=%s\nHTTPS_PROXY=%s\nNO_PROXY=%s\n' "$(proxy_url)" "$(proxy_url)" "$LAB_NO_PROXY" \
+        > "$LAB_DIR/e2e/cluster/proxy.env" )
+      "$TOOLS_BIN/yq" -i '.secretGenerator += [{"name": "os-upgrade-proxy", "behavior": "merge", "envs": ["proxy.env"]}]' \
+        "$LAB_DIR/e2e/cluster/kustomization.yaml" ;;
+  esac
   nodes=$(all_names | wc -l)
   if [ "$LAB_PREDOWNLOAD" = parallel ]; then
     "$TOOLS_BIN/yq" -i ".patches += [{\"target\": {\"kind\": \"Plan\", \"name\": \"os-upgrade-predownload\"},
       \"patch\": \"- op: replace\\n  path: /spec/concurrency\\n  value: $nodes\\n\"}]" "$LAB_DIR/e2e/cluster/kustomization.yaml"
   fi
   out="$LAB_DIR/e2e/cluster/manifests.yaml"
-  info "os-upgrade $(osu version)${LAB_IMAGE:+ (image $LAB_IMAGE)}: render, validation and apply of $LAB_OVERLAY"
+  info "os-upgrade $(osu version)${LAB_IMAGE:+ (image $LAB_IMAGE)}: render, validation and apply of $LAB_OVERLAY (proxy: $(proxy_mode))"
   osu apply cluster --yes
   kernel=$("$TOOLS_BIN/yq" 'select(.kind == "ConfigMap") | .data.KERNEL_VERSION' "$out")
   target=$("$TOOLS_BIN/yq" 'select(.kind == "ConfigMap") | .data.TARGET_VERSION' "$out")
@@ -407,12 +599,13 @@ cmd_e2e() {
   osu check >/dev/null || die "os-upgrade check reports problems"
   [ -z "$bad" ] || die "nodes not upgraded: $bad"
   osu rollout status
+  [ "$(proxy_mode)" = off ] || proxy_evidence
   info "E2E OK in $(( ($(date +%s) - start) / 60 )) min: all nodes on Ubuntu $target with $kernel"
 }
 
 cmd_down() {
-  for n in $(all_names); do delete_vm "$n"; done
-  rm -rf "$LAB_DIR"/seed-* "$KUBECONFIG_FILE"
+  for n in $(lab_vms); do delete_vm "$n"; done
+  rm -rf "$LAB_DIR"/seed-* "$KUBECONFIG_FILE" "$PROXY_MODE_FILE" "$PROXY_PASS_FILE"
   info "Lab VMs deleted (the base image and $LAB_DIR are kept)"
 }
 

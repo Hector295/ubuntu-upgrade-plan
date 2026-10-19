@@ -495,3 +495,22 @@ node** and the Job retries it. Check `systemctl status rke2-server` (or `rke2-ag
 
 Stop: do not label more nodes. `os-upgrade check`. If a member does not come back after
 the reboot, check `journalctl -u rke2-server` on that node before touching etcd.
+
+### `incomplete DaemonSets: kube-system/rke2-canal` after upgrading to 26.04
+
+`rollout` stops after verifying the node: the canal pod of that node stays `1/2` and the
+`calico-node` log shows `Failed to run nft transaction ... segmentation fault`. Seen in the lab
+with an nftables table of the host that used **sets** (`set ... { flags interval }`): on 26.04
+(nftables 1.1.6, kernel 7.0) the `nft` bundled in calico (`hardened-calico` v3.32.1, RKE2
+v1.33.13) crashes while programming its own tables. Without that table, or with the same rules
+written without sets, canal is fine.
+
+- Check the node's tables: `sudo nft list ruleset | grep -n 'set '`. Tables created by
+  kube-proxy, calico or iptables-nft are not the problem; a host firewall of your own may be.
+- Rewrite its rules without sets (one rule per address or range), reload it, and restart the
+  canal pod of the node: `kubectl -n kube-system delete pod <rke2-canal-...>`.
+- Then run the same `os-upgrade rollout upgrade ...` again: it resumes the node in progress,
+  verifies it and continues.
+
+If your nodes have their own nftables firewall, check this on the first node of the campaign
+(the canary group).

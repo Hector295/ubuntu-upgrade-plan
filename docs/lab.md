@@ -94,11 +94,37 @@ With 4 nodes it takes about one hour (each node: drain, release upgrade and one 
 The `lab-vm` overlay differs from a Rancher cluster overlay in the namespace and ServiceAccount of
 the official SUC (`system-upgrade`) and in a `postCompleteDelay` of 2 min.
 
+## Proxy
+
+`LAB_PROXY=open` or `LAB_PROXY=auth` at `up` time reproduces a cluster behind a proxy:
+
+```sh
+LAB_PROXY=auth lab/lab.sh up     # or open; later commands use the saved mode
+lab/lab.sh e2e
+```
+
+- An extra VM, `osu-lab-proxy` (1 CPU, 1 GB), runs squid. With `auth` it requires the user
+  `osu` and a random password with `@`, `:` and `!`, which go percent-encoded in the URL
+  (`.lab/proxy-password`).
+- The nodes **have no direct Internet access**: an nftables table (`ip osu_lab_egress`) only lets
+  them reach private addresses, and `up` checks that a direct download fails and one through
+  the proxy works. RKE2 is installed through the proxy and has it in `/etc/default/rke2-*`, as
+  in a cluster behind a proxy (images through containerd).
+- `e2e` configures os-upgrade the way an operator would: with `open`, `HTTP_PROXY`/`HTTPS_PROXY`/
+  `NO_PROXY` in `config.env`; with `auth`, in `proxy.env` (the `os-upgrade-proxy` Secret).
+- At the end it checks, from the squid log, that every node downloaded from Ubuntu through the
+  proxy; with `auth`, that every request carried the user and that the password does not appear
+  in the os-upgrade, apt, dist-upgrade or Job logs of the nodes. It also prints how many direct
+  connections the firewall blocked. Those are not os-upgrade: they are NTP (UDP 123 to
+  `ntp.ubuntu.com`, which cannot go through an HTTP proxy) and `motd-news` (it does not use the
+  proxy). In production the nodes need their own NTP server.
+
 ## What the lab does not cover
 
 - **Bare metal:** firmware, RAID controllers, NICs and real boot times. GRUB is tested with BIOS
   or UEFI (`LAB_UEFI=true`), without Secure Boot.
 - **Rancher:** it uses the official SUC, not Rancher's; there is no Rancher agent on the nodes.
-- **Proxy and internal mirror:** the VMs go straight to the internet.
+- **Internal mirror:** without `LAB_PROXY` the VMs go straight to the Internet, and with it
+  through squid to the public mirrors. A proxy with TLS inspection is not covered either.
 - **Workloads and PDBs:** the cluster is empty. To test the drain, deploy test applications with
   PDBs before the `e2e`.

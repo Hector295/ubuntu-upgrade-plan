@@ -32,7 +32,8 @@ What it does on each node:
   `rancher/system-upgrade-controller:v0.16.3`).
 - Ubuntu nodes on the source release of the transition (or already on the target, to only change
   the kernel), booting with GRUB.
-- Node access to an Ubuntu mirror (direct, through a proxy or an internal mirror).
+- Node access to an Ubuntu mirror (direct, through a proxy with or without credentials, or an
+  internal mirror): [configuration → Proxy](docs/configuration.md#proxy).
 - On your machine, one of the two release forms ([docs/install.md](docs/install.md)):
   - the **tarball** (Linux x86_64; brings yq, kustomize and kubeconform, uses your `kubectl`);
   - the **image** `ghcr.io/hector295/os-upgrade` (brings everything, kubectl v1.33.5 included).
@@ -99,8 +100,12 @@ Both transitions passed the VM lab end-to-end test ([docs/lab.md](docs/lab.md)):
 - 24.04 → 26.04.1 with `7.0.0-38-generic`.
 
 Both also passed it with the released image `ghcr.io/hector295/os-upgrade:0.1.0` (56-57 min);
-the 24.04 → 26.04 run predownloaded the 4 nodes in parallel (550 MB each, 3.5 min). It has not
-yet been run on bare metal or with Rancher's own SUC.
+the 24.04 → 26.04 run predownloaded the 4 nodes in parallel (550 MB each, 3.5 min).
+
+Behind a proxy, with the nodes **without direct Internet access** (squid, `LAB_PROXY`): 22.04 →
+24.04 without credentials and 24.04 → 26.04 with a user and a password with special characters
+(in the `proxy.env` Secret, never in logs). It has not yet been run on bare metal or with
+Rancher's own SUC.
 
 ## Documentation
 

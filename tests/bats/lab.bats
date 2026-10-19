@@ -85,3 +85,34 @@ setup() {
   [ "$status" -eq 2 ]
   [[ "$output" == *"unsupported LAB_UBUNTU: 20.04"* ]]
 }
+
+@test "lab down: also deletes the proxy VM and the saved proxy mode and password" {
+  echo osu-lab-proxy >> "$VIRSH_STATE/domains"
+  echo osu-lab-proxy.qcow2 >> "$VIRSH_STATE/vols"
+  echo auth > "$LAB_DIR/proxy-mode"
+  echo 'pw@:!x' > "$LAB_DIR/proxy-password"
+  run sh "$LAB" down
+  [ "$status" -eq 0 ]
+  [ "$(cat "$VIRSH_STATE/domains")" = "$(printf '%s\n' ubuntu22.04 ubuntu22.04-2)" ]
+  run grep -c osu-lab-proxy "$VIRSH_STATE/vols"
+  [ "$output" = 0 ]
+  [ ! -e "$LAB_DIR/proxy-mode" ]
+  [ ! -e "$LAB_DIR/proxy-password" ]
+}
+
+@test "lab plan: LAB_PROXY shows the proxy VM; the saved mode is used afterwards" {
+  run sh "$LAB" plan
+  [[ "$output" != *"osu-lab-proxy"* ]]
+  LAB_PROXY=auth run sh "$LAB" plan
+  [[ "$output" == *"osu-lab-proxy  squid (auth)"* ]]
+  echo open > "$LAB_DIR/proxy-mode"
+  run sh "$LAB" plan
+  [[ "$output" == *"osu-lab-proxy  squid (open)"* ]]
+}
+
+@test "lab up: an unknown LAB_PROXY is rejected before creating anything" {
+  LAB_PROXY=socks run sh "$LAB" up
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"LAB_PROXY must be off, open or auth"* ]]
+  [ ! -e "$VIRSH_STATE/calls.log" ] || run grep -c vol-create "$VIRSH_STATE/calls.log"
+}
