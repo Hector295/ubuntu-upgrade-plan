@@ -58,8 +58,8 @@ sh /usr/local/sbin/os-upgrade.sh status
 The same process works for nodes already on the target release: it skips the release upgrade
 and only changes the kernel, with one reboot.
 
-1. Change `KERNEL_VERSION` in the overlay `config.env` and run `make validate CLUSTER=<cluster>`.
-2. `kubectl apply -f out/<cluster>.yaml`.
+1. Change `KERNEL_VERSION` in the overlay `config.env` and run `os-upgrade validate <cluster>`.
+2. `os-upgrade apply <cluster>`.
 3. Remove the `done` label from the nodes (`kubectl label node N os-upgrade-`) and follow the
    [runbook](runbook.md) from the predownload (`rollout.sh predownload`, then
    `rollout.sh upgrade`).

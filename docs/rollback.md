@@ -54,7 +54,7 @@ running) and the SUC uncordons the node.
 It is one reboot per node, without a release upgrade:
 
 1. Pick a published ABI and check it ([kernel.md](kernel.md#choosing-and-checking-the-version)).
-2. `KERNEL_VERSION=<other>` in `config.env`, `make validate` and `kubectl apply`.
+2. `KERNEL_VERSION=<other>` in `config.env`, `os-upgrade apply <cluster>`.
 3. Remove the `done` label from the affected nodes (`kubectl label node N os-upgrade-`), then
    `rollout.sh predownload` and `rollout.sh upgrade` for them.
 
@@ -109,8 +109,8 @@ It is one reboot per node, without a release upgrade:
 
    ```sh
    kubectl label node N os-upgrade-
-   sh scripts/rollout.sh predownload --nodes N --wait
-   sh scripts/rollout.sh upgrade --nodes N
+   os-upgrade rollout predownload --nodes N --wait
+   os-upgrade rollout upgrade --nodes N
    ```
 
 If you reuse the disk without reinstalling (e.g. to register it again after an RKE2 failure),
@@ -126,7 +126,7 @@ sudo /usr/local/bin/rke2-uninstall.sh
 Same as path C, with these **mandatory** rules so the etcd quorum is not lost:
 
 1. **Only one control plane at a time**, and only if the other two etcd members are healthy:
-   `sh scripts/check-cluster.sh` must report 3 members, all healthy, and one leader.
+   `os-upgrade check` must report 3 members, all healthy, and one leader.
 2. If the node is the **etcd leader**, move the leadership first (runbook, 5.5).
 3. Delete the machine in Rancher and **check that its etcd member goes away**:
 

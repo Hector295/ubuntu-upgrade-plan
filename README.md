@@ -33,28 +33,34 @@ What it does on each node:
 - Ubuntu nodes on the source release of the transition (or already on the target, to only change
   the kernel), booting with GRUB.
 - Node access to an Ubuntu mirror (direct, through a proxy or an internal mirror).
-- On your machine: `make` and `curl`. `make tools` downloads pinned versions of the rest into
-  `tools/bin`: shellcheck, bats, kubeconform, kustomize, yq and kubectl (v1.33.5). The operator
-  scripts use the `kubectl` in your `PATH`, or the one in `KUBECTL`
-  (`export KUBECTL=$PWD/tools/bin/kubectl`); the lab uses the pinned one by default.
+- On your machine, one of the two release forms ([docs/install.md](docs/install.md)):
+  - the **tarball** (Linux x86_64; brings yq, kustomize and kubeconform, uses your `kubectl`);
+  - the **image** `ghcr.io/hector295/os-upgrade` (brings everything, kubectl v1.33.5 included).
 - **A kubeconfig of the downstream cluster with cluster-admin permissions** to export the CRD,
-  apply the Plans, label nodes and query etcd. `make render`/`make validate` do not need it. How
+  apply the Plans, label nodes and query etcd. `os-upgrade render`/`validate` do not need it. How
   to get it and precautions with several clusters:
   [runbook → Cluster access](docs/runbook.md#cluster-access-kubeconfig).
 
 ## Quick start
 
 ```sh
+V=0.1.0   # see the Releases page
+curl -fsSL https://github.com/Hector295/ubuntu-upgrade-plan/releases/download/v$V/os-upgrade-$V-linux-amd64.tar.gz \
+  | sudo tar -xz -C /opt
+sudo ln -sfn /opt/os-upgrade-$V-linux-amd64/bin/os-upgrade /usr/local/bin/os-upgrade
+# or the image: docker run --rm -it ... ghcr.io/hector295/os-upgrade:$V (docs/install.md)
+
 export KUBECONFIG=~/.kube/my-cluster.yaml   # cluster kubeconfig (cluster-admin)
 kubectl config current-context              # ALWAYS check which cluster you point to
-make tools                                  # pinned tools in tools/bin
-cp -r manifests/overlays/lab manifests/overlays/my-cluster
-$EDITOR manifests/overlays/my-cluster/config.env      # at least KERNEL_VERSION; for 24.04 -> 26.04 also TARGET_VERSION=26.04
-mkdir -p manifests/schemas/my-cluster
-kubectl get crd plans.upgrade.cattle.io -o json > manifests/schemas/my-cluster/crd-plans.json
-make validate CLUSTER=my-cluster            # renders out/my-cluster.yaml and validates it
-kubectl apply -f out/my-cluster.yaml        # creates the Plans; no node is affected yet
+os-upgrade init my-cluster --kernel 6.8.0-139-generic   # for 24.04 -> 26.04: --kernel 7.0.0-38-generic --target 26.04
+$EDITOR my-cluster/config.env               # proxy, mirror... (docs/configuration.md)
+os-upgrade export-crd my-cluster            # the cluster's Plan CRD, for the validation
+os-upgrade validate my-cluster              # renders my-cluster/manifests.yaml and validates it
+os-upgrade apply my-cluster                 # creates the Plans; no node is affected yet
 ```
+
+The cluster configuration (`my-cluster/`) lives outside the tool: keep it in a repo of your own
+and upgrading the tool does not touch it.
 
 The Plans only act on nodes with the `os-upgrade` label:
 
@@ -68,14 +74,14 @@ The Plans only act on nodes with the `os-upgrade` label:
 The orchestrator sets the labels:
 
 ```sh
-sh scripts/preflight.sh --group 1                      # checks, read-only
-sh scripts/rollout.sh predownload --group 1 --wait     # predownload (no impact)
-sh scripts/rollout.sh upgrade --group 1 --dry-run      # plan and checks, changes nothing
-sh scripts/rollout.sh upgrade --group 1                # node by node, verifying and confirming
-sh scripts/rollout.sh status --group 1
+os-upgrade preflight --group 1                      # checks, read-only
+os-upgrade rollout predownload --group 1 --wait     # predownload (no impact)
+os-upgrade rollout upgrade --group 1 --dry-run      # plan and checks, changes nothing
+os-upgrade rollout upgrade --group 1                # node by node, verifying and confirming
+os-upgrade rollout status --group 1
 ```
 
-`rollout.sh` orders workers → non-leader control planes → etcd leader (with `move-leader`
+`rollout` orders workers → non-leader control planes → etcd leader (with `move-leader`
 first). It supervises prepare and the drain with timeouts, and holds the node without touching it
 if they fail. After each node it verifies the target release, kernel, DaemonSets, pods, DNS and
 etcd, marks the node `done` and asks for confirmation before the next one. Groups are an
@@ -96,6 +102,7 @@ It has not yet been run on bare metal or with Rancher's own SUC.
 
 ## Documentation
 
+- [docs/install.md](docs/install.md): tarball and image, commands, publishing a release.
 - [docs/runbook.md](docs/runbook.md): step-by-step procedure, monitoring and common problems.
 - [docs/configuration.md](docs/configuration.md): all parameters, supported transitions and how
   to customize a cluster.
@@ -107,6 +114,7 @@ It has not yet been run on bare metal or with Rancher's own SUC.
 ## Layout
 
 ```
+bin/os-upgrade                 single entry point (init, render, validate, apply, preflight, rollout...)
 scripts/upgrade.sh             runs on the nodes (subcommands prepare, predownload, upgrade...)
 scripts/rollout.sh             orchestrator: predownload, node-by-node upgrade, status
 scripts/preflight.sh           cluster checks before a campaign (read-only)
@@ -124,15 +132,23 @@ tests/bats/                    bats tests
 tests/stubs/                   fake node commands (apt, dpkg, systemctl, grub...) for upgrade.sh
 tests/k8s-stubs/               fake kubectl over a fake cluster for the operator scripts
 tests/lab-stubs/               fake virsh for the lab safety tests
-tools/                         install.sh downloads the pinned tools (tools/bin is not versioned)
+tools/                         install.sh downloads the pinned tools (tools/bin is not versioned);
+                               dist.sh builds the release tarball
+Dockerfile                     operator image (make image)
+.github/workflows/             ci: make check on main and PRs; release: tarball + image on v* tags
 ```
 
 ## Development
 
+From a clone, `bin/os-upgrade` works like the installed one (after `make tools`), and the lab
+overlays live in `manifests/overlays/` with their CRD in `manifests/schemas/`.
+
 ```sh
+make tools      # pinned tools in tools/bin: shellcheck, bats, kubeconform, kustomize, yq, kubectl
 make lint       # shellcheck with no warnings
 make test       # bats: upgrade.sh on a fake root, operator scripts on a fake cluster, manifests, lab
 make check      # lint + test + validate
+make dist       # release tarball in dist/; make image builds the image too
 lab/lab.sh up && lab/lab.sh e2e   # full test on local VMs (see docs/lab.md)
 ```
 

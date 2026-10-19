@@ -7,13 +7,17 @@ confirmation before the next one. The manual procedures, node by node
 ([step 6](#6-manual-window-by-groups)), remain as an alternative and as a reference of what the
 orchestrator does.
 
+The commands use `os-upgrade` from the release tarball or the image ([install.md](install.md));
+from a clone of the repo, `bin/os-upgrade` is the same. `<cluster>` is the directory with the
+cluster overlay.
+
 Conventions: `N` is the node name, `G` the group number and `NS=cattle-system`. The examples are
 from the 22.04 → 24.04 campaign; for 24.04 → 26.04 (`TARGET_VERSION=26.04`) the procedure is the
 same with the other versions ([transitions](configuration.md#supported-transitions)).
 
 ## Cluster access (kubeconfig)
 
-`make render` and `make validate` work without a cluster. **Everything else needs a kubeconfig**
+`os-upgrade render` and `os-upgrade validate` work without a cluster. **Everything else needs a kubeconfig**
 of the downstream cluster (not the Rancher management cluster) with **cluster-admin**
 permissions. It is needed to:
 
@@ -23,8 +27,9 @@ permissions. It is needed to:
 - read Jobs and logs;
 - `exec` into the etcd pods (`preflight.sh`, `rollout.sh`, `check-cluster.sh`).
 
-The operator scripts also need `make tools` (they use `tools/bin/yq`) and GNU `date`. They use the
-`kubectl` in the `PATH`, or the one in `KUBECTL` (e.g. `export KUBECTL=$PWD/tools/bin/kubectl`).
+The tarball brings its own yq, kustomize and kubeconform, and uses the `kubectl` in the `PATH`
+(or the one in `KUBECTL`) and GNU `date`. The image brings everything, kubectl included
+([install.md](install.md#container-image)).
 
 How to get it:
 
@@ -61,10 +66,10 @@ NS=cattle-system
 3. **Freeze RKE2 upgrades in Rancher** for the duration of the campaign: Rancher's
    `system-agent-upgrader*` Plans must not run at the same time as these.
 4. **Recent etcd snapshot** (Rancher → cluster → Snapshots, or `kubectl get etcdsnapshotfiles`).
-5. **Healthy state:** `sh scripts/preflight.sh` (read-only) checks in one go the SUC, the Plans,
+5. **Healthy state:** `os-upgrade preflight` (read-only) checks in one go the SUC, the Plans,
    that no Rancher Plan is in progress, nodes Ready, etcd (members, health, one leader, RAFT INDEX
    in sync, alarms), the age of the latest snapshot, PDBs that would block the drain and the free
-   space on the nodes. It exits with 1 if something fails. `sh scripts/check-cluster.sh` shows
+   space on the nodes. It exits with 1 if something fails. `os-upgrade check` shows
    the details (etcd tables, Jobs, pods with problems).
 6. **Define the groups** (to predownload and upgrade in batches): one `os-upgrade-group` label
    per node.
@@ -80,10 +85,13 @@ NS=cattle-system
 ## 1. Render and apply the Plans
 
 ```sh
-make validate CLUSTER=<cluster>
-kubectl apply -f out/<cluster>.yaml
+os-upgrade validate <cluster>    # renders <cluster>/manifests.yaml and validates it
+os-upgrade apply <cluster>       # validates again, shows the context, asks and applies
 kubectl -n $NS get plans
 ```
+
+The cluster overlay is created once with `os-upgrade init <cluster> --kernel ...` and
+`os-upgrade export-crd <cluster>` ([install.md](install.md#first-use-on-a-cluster)).
 
 Applying the Plans does not touch any node: they only act on nodes with the `os-upgrade` label.
 
@@ -104,7 +112,7 @@ No drain, no cordon and no reboot. It can be launched per node or per group; the
 on 2 nodes at a time (`concurrency`, adjustable in the overlay). With the orchestrator:
 
 ```sh
-sh scripts/rollout.sh predownload --group G --wait   # labels, waits and summarizes warnings per node
+os-upgrade rollout predownload --group G --wait   # labels, waits and summarizes warnings per node
 ```
 
 It skips nodes in `done`, `hold` and those in `upgrade`. Without `--wait` it only labels. By hand:
@@ -132,10 +140,10 @@ the window is downloaded during the window.
 ## 4. Window with `rollout.sh` (recommended)
 
 ```sh
-sh scripts/preflight.sh --group G                     # read-only
-sh scripts/rollout.sh upgrade --group G --dry-run     # plan, order and checks, changes nothing
-sh scripts/rollout.sh upgrade --group G               # the window
-sh scripts/rollout.sh status --group G                # state of the group's nodes
+os-upgrade preflight --group G                     # read-only
+os-upgrade rollout upgrade --group G --dry-run     # plan, order and checks, changes nothing
+os-upgrade rollout upgrade --group G               # the window
+os-upgrade rollout status --group G                # state of the group's nodes
 ```
 
 Instead of `--group G` you can use `--nodes n1,n2`. The window lasts hours: run it inside `tmux`
@@ -255,7 +263,7 @@ appears after `postCompleteDelay` (10 min); the uncordon is immediate. Verify:
 ```sh
 kubectl get node N -o wide                 # Ready, OS-IMAGE Ubuntu 24.04, KERNEL 6.8.0-139-generic
 kubectl get pods -A -o wide --field-selector spec.nodeName=N | grep -v Running   # no broken pods
-sh scripts/check-cluster.sh                # control plane: 3 healthy etcd members and one leader
+os-upgrade check                # control plane: 3 healthy etcd members and one leader
 ```
 
 ### 5.4 Close the node
@@ -346,7 +354,7 @@ includes nodes whose hash matches the Plan's, so it never marks a node halfway t
 ```sh
 kubectl label node -l "os-upgrade-group=$G,plan.upgrade.cattle.io/$PLAN=$H" os-upgrade=done --overwrite
 kubectl get nodes -l os-upgrade-group=$G -L os-upgrade     # all must be done
-sh scripts/check-cluster.sh
+os-upgrade check
 ```
 
 Move to the next group only with a healthy cluster.
@@ -380,8 +388,8 @@ The group stops on that node (it occupies the slot). Options:
 
 ## 7. End of the campaign
 
-- All nodes with `os-upgrade=done` and `sh scripts/check-cluster.sh` healthy.
-- Optional: `kubectl delete -f out/<cluster>.yaml` and remove the labels
+- All nodes with `os-upgrade=done` and `os-upgrade check` healthy.
+- Optional: `kubectl delete -f <cluster>/manifests.yaml` and remove the labels
   (`kubectl label node N os-upgrade-`). What keeps the kernel in place (pin, hold, GRUB) stays on
   the nodes.
 - Re-enable RKE2 upgrades in Rancher.
@@ -413,8 +421,8 @@ and there is no mark.
 | `not enough free space on ...` | Free up space (`apt-get clean`, old kernels, logs) |
 | `apt-get update failed (proxy or mirror unreachable?)` | Proxy or mirror: check `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` |
 | `the node Ubuntu mirror (...) is not a public mirror` | Internal mirror with `ALLOW_THIRD_PARTY=false`: the upgrade would switch it to `archive.ubuntu.com`. Use `ALLOW_THIRD_PARTY=true` ([configuration.md](configuration.md#apt-sources-internal-mirror-and-third-party-repos)) |
-| `the post-upgrade hook has syntax errors` | Fix the overlay's `post-upgrade-hook.sh`, `make validate` and `kubectl apply` |
-| `KERNEL_VERSION ...` | Overlay configuration; fix it, `make validate` and `kubectl apply` |
+| `the post-upgrade hook has syntax errors` | Fix the overlay's `post-upgrade-hook.sh`, `os-upgrade apply <cluster>` |
+| `KERNEL_VERSION ...` | Overlay configuration; fix it, `os-upgrade apply <cluster>` |
 | `the node is on 22.04 and the target is 26.04` | `do-release-upgrade` only jumps one LTS: take that node through a campaign to 24.04 first |
 
 To retry after fixing it: `kubectl -n $NS delete job <job>`. To leave the node for later:
@@ -485,5 +493,5 @@ node** and the Job retries it. Check `systemctl status rke2-server` (or `rke2-ag
 
 ### etcd degraded during the control plane
 
-Stop: do not label more nodes. `sh scripts/check-cluster.sh`. If a member does not come back after
+Stop: do not label more nodes. `os-upgrade check`. If a member does not come back after
 the reboot, check `journalctl -u rke2-server` on that node before touching etcd.

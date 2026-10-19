@@ -1,12 +1,17 @@
 # Configuration
 
-Each cluster has its overlay in `manifests/overlays/<cluster>/`, with two files:
+Each cluster has its overlay: a directory with these files.
 
 - `config.env`: parameters for the process on the nodes. It becomes the ConfigMap
   `os-upgrade-config-<hash>`, which the Jobs receive as environment variables.
 - `kustomization.yaml`: image, namespace and Plan settings (window, deadlines...).
+- `crd-plans.json`: the cluster's Plan CRD, for `os-upgrade validate` (`os-upgrade export-crd`).
+- `post-upgrade-hook.sh` (optional): see [Post-upgrade hook](#post-upgrade-hook).
 
-To create a new cluster: `cp -r manifests/overlays/lab manifests/overlays/<cluster>`.
+To create one: `os-upgrade init <cluster> --kernel <X.Y.Z-N-generic> [--target 26.04]`. The
+overlay refers to the base as `../../base`, wherever it lives: `os-upgrade render` puts it on top
+of the base of the installed version. In the repo, the overlays of the lab are in
+`manifests/overlays/` and `make validate CLUSTER=<name>` uses `manifests/schemas/<name>/`.
 
 > Any change to `config.env` or to `scripts/upgrade.sh` produces a ConfigMap/Secret with a
 > different hash and therefore new Plans. **Do not change the configuration while nodes are
@@ -56,11 +61,11 @@ here.
 - **A node two LTS releases behind** (22.04 with `TARGET_VERSION=26.04`) is rejected in `prepare`,
   before the drain: first a campaign to 24.04, then another one to 26.04.
 - **A node already on the target release** only changes its kernel.
-- The table lives in `scripts/upgrade.sh` (`TRANSITIONS`); `make validate` rejects a
+- The table lives in `scripts/upgrade.sh` (`TRANSITIONS`); `os-upgrade validate` rejects a
   `TARGET_VERSION` that is not in it.
 - The Plans' `spec.version` takes the value of `TARGET_VERSION` through the component
   `manifests/components/target-version`. New overlays copied from `lab` already include it;
-  `make validate` reports it if it is missing.
+  `os-upgrade validate` reports it if it is missing.
 
 ## Apt sources: internal mirror and third-party repos
 
@@ -95,13 +100,14 @@ monitoring agents, etc.
 - If it fails, it is retried (`POST_UPGRADE_HOOK_RETRIES`, 20 s apart). If it keeps failing, the
   node is **marked as failed and stays cordoned**: the system is upgraded, but something of your
   own does not work.
-- Its syntax is checked by `make validate` and by `prepare` (before the drain), and it goes
-  through shellcheck in `make lint`.
+- Its syntax is checked by `os-upgrade validate` and by `prepare` (before the drain). The ones of
+  the repo overlays also go through shellcheck in `make lint`.
 
-To enable it for a cluster, start from the example `docs/examples/post-upgrade-hook.sh`:
+To enable it for a cluster, start from the example `docs/examples/post-upgrade-hook.sh` (in the
+tarball too; in the image it is under `/opt/os-upgrade/docs/examples/`):
 
 ```sh
-cp docs/examples/post-upgrade-hook.sh manifests/overlays/<cluster>/
+cp docs/examples/post-upgrade-hook.sh <cluster>/
 ```
 
 and add to the overlay `kustomization.yaml`:
@@ -119,7 +125,7 @@ Plans.
 
 ## Plan settings (`kustomization.yaml`)
 
-Full example of a production overlay (checked with `make validate`):
+Full example of a production overlay (checked with `os-upgrade validate`):
 
 ```yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -181,10 +187,10 @@ these Jobs from running **on the same node**; it does not serialize the cluster)
 
 ## What validation prevents
 
-`make validate CLUSTER=<cluster>` fails if:
+`os-upgrade validate <cluster>` fails if:
 
 - A Plan uses a field the cluster CRD does not know (e.g. `postCompleteLabels`) or has a wrong
-  type. It is validated against `manifests/schemas/<cluster>/crd-plans.json` in strict mode.
+  type. It is validated against `<cluster>/crd-plans.json` in strict mode.
 - `spec.drain.timeout` is present: in SUC v0.16 it is nanoseconds in an int32 (maximum about 2 s)
   and a large value broke the listing of all the controller's Plans.
 - A Plan with drain has a `concurrency` other than 1.
@@ -197,4 +203,4 @@ these Jobs from running **on the same node**; it does not serialize the cluster)
 - The resources end up in different namespaces.
 
 If you upgrade Rancher, export the CRD again:
-`kubectl get crd plans.upgrade.cattle.io -o json > manifests/schemas/<cluster>/crd-plans.json`.
+`os-upgrade export-crd <cluster>`.
