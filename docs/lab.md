@@ -50,7 +50,7 @@ To test a **released image** instead of the repo (`bin/os-upgrade`), pass it in 
 needs Docker:
 
 ```sh
-LAB_IMAGE=ghcr.io/hector295/os-upgrade:0.1.0 lab/lab.sh e2e
+LAB_IMAGE=ghcr.io/hector295/os-upgrade:0.3.0 lab/lab.sh e2e
 ```
 
 To test the **parallel predownload** (every node downloading at once, as with a raised
@@ -60,7 +60,7 @@ single `rollout predownload` and fails unless all the Jobs overlapped:
 
 ```sh
 LAB_UBUNTU=24.04 LAB_PREDOWNLOAD=parallel LAB_OVERLAY=$PWD/manifests/overlays/lab-vm-2604 \
-  LAB_IMAGE=ghcr.io/hector295/os-upgrade:0.1.0 lab/lab.sh e2e
+  LAB_IMAGE=ghcr.io/hector295/os-upgrade:0.3.0 lab/lab.sh e2e
 ```
 
 Use the same `LAB_UBUNTU` for every command of that lab (`status`, `ssh`, `down`...).

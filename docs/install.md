@@ -14,7 +14,7 @@ Both render exactly the same manifests for the same version. Use a fixed version
 ## Tarball
 
 ```sh
-V=0.1.0
+V=0.3.0
 URL=https://github.com/Hector295/ubuntu-upgrade-plan/releases/download/v$V
 curl -fsSLO "$URL/os-upgrade-$V-linux-amd64.tar.gz"
 curl -fsSLO "$URL/os-upgrade-$V-linux-amd64.tar.gz.sha256"
@@ -31,10 +31,10 @@ symlink; the cluster configuration is not inside the package, so nothing else ch
 ## Container image
 
 ```sh
-docker pull ghcr.io/hector295/os-upgrade:0.1.0
+docker pull ghcr.io/hector295/os-upgrade:0.3.0
 alias os-upgrade='docker run --rm -it --user "$(id -u):$(id -g)" -v /etc/localtime:/etc/localtime:ro \
   -v "$PWD:/work" -v "$KUBECONFIG:/kube/config:ro" -e KUBECONFIG=/kube/config \
-  ghcr.io/hector295/os-upgrade:0.1.0'
+  ghcr.io/hector295/os-upgrade:0.3.0'
 os-upgrade version
 ```
 
@@ -48,7 +48,7 @@ os-upgrade version
 - If your machine needs a proxy to reach the cluster API, pass it too:
   `-e HTTPS_PROXY -e NO_PROXY` (with credentials in it, mind your shell history).
 - The image runs `kubectl` too: `docker run --rm -it ... --entrypoint kubectl
-  ghcr.io/hector295/os-upgrade:0.1.0 get nodes`.
+  ghcr.io/hector295/os-upgrade:0.3.0 get nodes`.
 - The registry is public: no `docker login` is needed. To use an internal registry, copy the
   image there (`docker pull`, `docker tag`, `docker push`).
 
@@ -93,7 +93,7 @@ The first line of `manifests.yaml` records the tool version that rendered it.
 From `main`, with `make check` green:
 
 ```sh
-git tag v0.2.0 && git push origin v0.2.0
+git tag v0.4.0 && git push origin v0.4.0
 ```
 
 The `release` workflow runs `make check`, publishes the tarball and its sha256 on GitHub Releases

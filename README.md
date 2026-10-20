@@ -45,7 +45,7 @@ What it does on each node:
 ## Quick start
 
 ```sh
-V=0.1.0   # see the Releases page
+V=0.3.0   # see the Releases page
 curl -fsSL https://github.com/Hector295/ubuntu-upgrade-plan/releases/download/v$V/os-upgrade-$V-linux-amd64.tar.gz \
   | sudo tar -xz -C /opt
 sudo ln -sfn /opt/os-upgrade-$V-linux-amd64/bin/os-upgrade /usr/local/bin/os-upgrade
